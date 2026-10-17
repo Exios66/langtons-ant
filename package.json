@@ -1,0 +1,23 @@
+{
+  "name": "langtons-ant",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Interactive Langton's ant & turmite simulator — a 2D Turing machine in your browser. Deterministic, seedable, shareable.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "deploy": "npm run build && node scripts/deploy.mjs",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vite": "^6.3.5",
+    "vitest": "^3.2.0"
+  }
+}
