@@ -11,6 +11,10 @@
 
 </div>
 
+<p align="center">
+  <img src="public/demo.gif" alt="Langton's ant running: chaos collapses into a periodic highway" width="800" />
+</p>
+
 ## What is this?
 
 In 1986 Christopher Langton asked what a single "ant" following four trivial rules could build. The classic ant paints ~10,000 steps of pseudo-random noise, then abruptly locks into a clean 104-step periodic highway it extends forever — and whether this *always* happens is still an open conjecture. Generalized ants ("turmites") turn out to be programmable matter: Langton's ant is provably universal (2002) [2], and all nontrivial 2D Turing machines of this kind are Turing-universal [3]. Between 2024 and 2025 whole families of multi-color ants finally had their highways proven [6][7][8] — turning the Highway Conjecture from folklore into real mathematics [14].
