@@ -1,0 +1,21 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+type: software
+title: "Langton's Ant — an interactive 2D Turing-machine simulator"
+abstract: "A browser-based simulator for Langton's ant and generalized turmites: any N-color x M-state rule, seeded and permalink-sharable, rendered with chunked typed arrays and dirty-rect Canvas2D."
+authors:
+  - name: "Exios66"
+keywords:
+  - langtons-ant
+  - turmite
+  - cellular-automata
+  - turing-machine
+  - simulator
+  - typescript
+license: MIT
+version: 0.1.0
+date-released: "2026-10-17"
+url: "https://exios66.github.io/langtons-ant/"
+repository-code: "https://github.com/Exios66/langtons-ant"
+# Add `doi:` once Zenodo mints one after the first GitHub release.
+# No `preferred-citation`: there is no underlying paper yet.
