@@ -32,8 +32,8 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230a0c10'/%3E%3Crect x='10' y='10' width='6' height='6' fill='%23fff'/%3E%3Crect x='16' y='10' width='6' height='6' fill='%23fff'/%3E%3Crect x='22' y='10' width='6' height='6' fill='%23fff'/%3E%3Crect x='22' y='16' width='6' height='6' fill='%23fff'/%3E%3Crect x='16' y='22' width='6' height='6' fill='%23fff'/%3E%3Crect x='28' y='6' width='4' height='4' fill='%23ffcc00'/%3E%3C/svg%3E"
     />
 
-    <script type="module" crossorigin src="/langtons-ant/assets/index-x1jVRNFR.js"></script>
-    <link rel="stylesheet" crossorigin href="/langtons-ant/assets/index-C1RnVvkp.css">
+    <script type="module" crossorigin src="/langtons-ant/assets/index-OfrodUm8.js"></script>
+    <link rel="stylesheet" crossorigin href="/langtons-ant/assets/index-BNmoc0FC.css">
   </head>
   <body>
     <canvas id="board" aria-label="Simulation canvas — pan by dragging, zoom with the wheel or a pinch"></canvas>
@@ -46,6 +46,7 @@
       <span class="chip"><span class="lbl">ants</span><span class="val" id="st-ants">0</span></span>
       <span class="chip"><span class="lbl">bbox</span><span class="val" id="st-bbox">—</span></span>
       <span class="chip"><span class="lbl">grid</span><span class="val" id="st-mem">0 B</span></span>
+      <span class="chip hidden" id="st-highway"><span class="lbl">highway</span><span class="val" id="st-highway-step">—</span></span>
     </div>
 
     <!-- Transport -->
@@ -114,6 +115,9 @@
         <label class="row" for="paletteSelect">Palette
           <select id="paletteSelect" aria-label="Color palette"></select>
         </label>
+        <label class="row" for="chkAutoPause">
+          <input id="chkAutoPause" type="checkbox" /> Auto-pause on highway
+        </label>
       </section>
 
       <section aria-labelledby="h-presets">
@@ -126,6 +130,9 @@
         <div class="row btn-row wrap">
           <button id="btnPermalink" class="btn btn-primary">Copy permalink</button>
           <button id="btnPNG" class="btn">Export PNG</button>
+          <button id="btnJSON" class="btn" title="Save the full session (rule, ants, steps, camera, seed) as JSON">Export JSON</button>
+          <button id="btnLoadJSON" class="btn" title="Restore a previously saved session">Import JSON</button>
+          <button id="btnDocs" class="btn" title="What is a turmite? (rule-space primer)">Docs</button>
         </div>
         <p class="hint">The run autosaves locally every 5 s; permalinks carry rule, ants, steps, camera, seed and palette in the URL hash.</p>
       </section>
