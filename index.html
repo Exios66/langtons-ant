@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Langton's Ant &amp; Turmites — an interactive 2D Turing machine</title>
+    <meta
+      name="description"
+      content="Watch a Langton's ant or turmite build its universe. 21 curated rules from the classic RL ant to proven-halting busy beavers, with permalinks, seeds and a colony mode."
+    />
+    <meta name="theme-color" content="#0a0c10" />
+
+    <!-- Social cards -->
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://exios66.github.io/langtons-ant/" />
+    <meta property="og:title" content="Langton's Ant &amp; Turmites — an interactive 2D Turing machine" />
+    <meta
+      property="og:description"
+      content="Watch a Langton's ant or turmite build its universe. 21 curated rules, permalinks, seeds and colony mode."
+    />
+    <meta property="og:image" content="https://exios66.github.io/langtons-ant/social-card.png" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Langton's Ant &amp; Turmites" />
+    <meta
+      name="twitter:description"
+      content="Watch a Langton's ant or turmite build its universe — curated rules, permalinks, seeds, colony mode."
+    />
+    <meta name="twitter:image" content="https://exios66.github.io/langtons-ant/social-card.png" />
+
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230a0c10'/%3E%3Crect x='10' y='10' width='6' height='6' fill='%23fff'/%3E%3Crect x='16' y='10' width='6' height='6' fill='%23fff'/%3E%3Crect x='22' y='10' width='6' height='6' fill='%23fff'/%3E%3Crect x='22' y='16' width='6' height='6' fill='%23fff'/%3E%3Crect x='16' y='22' width='6' height='6' fill='%23fff'/%3E%3Crect x='28' y='6' width='4' height='4' fill='%23ffcc00'/%3E%3C/svg%3E"
+    />
+
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <canvas id="board" aria-label="Simulation canvas — pan by dragging, zoom with the wheel or a pinch"></canvas>
+
+    <!-- Telemetry -->
+    <div id="status" class="glass" role="status" aria-live="off">
+      <span class="chip"><span class="lbl">steps</span><span class="val" id="st-steps">0</span></span>
+      <span class="chip"><span class="lbl">steps/s</span><span class="val" id="st-rate">0</span></span>
+      <span class="chip"><span class="lbl">fps</span><span class="val" id="st-fps">0</span></span>
+      <span class="chip"><span class="lbl">ants</span><span class="val" id="st-ants">0</span></span>
+      <span class="chip"><span class="lbl">bbox</span><span class="val" id="st-bbox">—</span></span>
+      <span class="chip"><span class="lbl">grid</span><span class="val" id="st-mem">0 B</span></span>
+    </div>
+
+    <!-- Transport -->
+    <div id="transport" class="glass">
+      <button id="btnPlay" class="tbtn" aria-label="Play" aria-pressed="false">
+        <svg id="iconPlay" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" /></svg>
+        <svg id="iconPause" viewBox="0 0 24 24" aria-hidden="true" hidden>
+          <path d="M7 5h4v14H7zM13 5h4v14h-4z" />
+        </svg>
+      </button>
+      <button id="btnStep" class="tbtn" aria-label="Single step" title="One whole simulation step (s)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5v14l8-7zM16 5h2v14h-2z" /></svg>
+      </button>
+      <button id="btnJump" class="tbtn" aria-label="Fast-forward 10,000 steps" title="Run +10,000 steps (may briefly freeze)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5v14l7-7zM12 5v14l7-7z" /></svg>
+        <span class="tlabel">+10k</span>
+      </button>
+      <button id="btnReset" class="tbtn" aria-label="Reset" title="Fresh grid, ants at origin (r)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5V2L8 6l4 4V7a5 5 0 1 1-5 5H5a7 7 0 1 0 7-7z" /></svg>
+      </button>
+      <button id="btnFit" class="tbtn" aria-label="Fit view" title="Fit the visited region (f)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5v2H6v3zM15 4h5v5h-2V6h-3zM4 15h2v3h3v2H4zM18 15h2v5h-5v-2h3z" /></svg>
+      </button>
+      <button id="btnHelp" class="tbtn" aria-label="Help and shortcuts" title="Shortcuts (?)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6 0 0 1 6 6c0 2.9-1.8 4.1-3 5-.8.6-1 .9-1 2h-4c0-2.3.6-3.3 2-4.4.9-.7 2-1.4 2-2.6a2 2 0 1 0-4 0H6a6 6 0 0 1 6-6zM10 18h4v3h-4z" /></svg>
+      </button>
+      <label class="speed" for="speed">
+        <span id="speedLabel">1,000 steps/s</span>
+        <input id="speed" type="range" min="0" max="1" step="0.005" value="0.5" aria-label="Simulation speed, logarithmic 1 to 1,000,000 steps per second" />
+      </label>
+    </div>
+
+    <button id="panelToggle" class="tbtn glass" aria-expanded="false" aria-controls="panel" aria-label="Toggle controls">☰ Controls</button>
+
+    <!-- Control panel -->
+    <aside id="panel" class="glass" aria-label="Controls">
+      <header class="panel-head">
+        <h2>Colony of ants</h2>
+        <button id="btnClosePanel" class="tbtn" aria-label="Close panel">✕</button>
+      </header>
+
+      <section aria-labelledby="h-rule">
+        <h3 id="h-rule">Rule</h3>
+        <div id="ruleNotation" class="notation" title="Shortest canonical form"></div>
+        <div id="ruleEditor"></div>
+        <div class="row btn-row">
+          <button id="btnMirror" class="btn">Mirror</button>
+        </div>
+        <p class="hint">Mirror flips L↔R (chirality). Absolute-heading rules keep their imported turns even though the editor offers only relative turns.</p>
+      </section>
+
+      <section aria-labelledby="h-colony">
+        <h3 id="h-colony">Colony</h3>
+        <div class="row btn-row wrap">
+          <button id="btnAddAnt" class="btn">Add ant</button>
+          <button id="btnClearAnts" class="btn">Clear</button>
+          <button id="btnSeed5" class="btn">Seed 5</button>
+          <button id="btnSeed25" class="btn">Seed 25</button>
+          <button id="btnPlace" class="btn" aria-pressed="false" title="Click or tap the canvas to add / remove ants (Esc to exit)">Place ants</button>
+        </div>
+        <div id="colonyInfo" class="hint">no ants</div>
+      </section>
+
+      <section aria-labelledby="h-display">
+        <h3 id="h-display">Display</h3>
+        <label class="row" for="paletteSelect">Palette
+          <select id="paletteSelect" aria-label="Color palette"></select>
+        </label>
+      </section>
+
+      <section aria-labelledby="h-presets">
+        <h3 id="h-presets">Preset gallery</h3>
+        <div id="presetList"></div>
+      </section>
+
+      <section aria-labelledby="h-session">
+        <h3 id="h-session">Session</h3>
+        <div class="row btn-row wrap">
+          <button id="btnPermalink" class="btn btn-primary">Copy permalink</button>
+          <button id="btnPNG" class="btn">Export PNG</button>
+        </div>
+        <p class="hint">The run autosaves locally every 5 s; permalinks carry rule, ants, steps, camera, seed and palette in the URL hash.</p>
+      </section>
+    </aside>
+
+    <!-- Help overlay -->
+    <div id="help" class="help-overlay" role="dialog" aria-modal="false" aria-label="Keyboard shortcuts">
+      <div class="glass help-card">
+        <header class="panel-head"><h2>Shortcuts</h2><button id="btnCloseHelp" class="tbtn" aria-label="Close help">✕</button></header>
+        <ul class="help-list">
+          <li><kbd>space</kbd> play / pause</li>
+          <li><kbd>s</kbd> single step</li>
+          <li><kbd>r</kbd> reset (fresh grid, ant at origin)</li>
+          <li><kbd>+</kbd> / <kbd>−</kbd> speed up / down</li>
+          <li><kbd>f</kbd> fit view</li>
+          <li><kbd>?</kbd> toggle this help</li>
+          <li><kbd>Esc</kbd> close help · exit place mode</li>
+          <li>drag = pan · wheel / pinch = zoom at cursor</li>
+          <li>place mode: click / tap canvas to add or remove an ant</li>
+        </ul>
+      </div>
+    </div>
+
+    <div id="toasts" aria-live="polite"></div>
+
+    <script type="module" src="./src/app/main.ts"></script>
+  </body>
+</html>
