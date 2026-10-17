@@ -33,6 +33,9 @@ import { fmtBytes, fmtInt } from "./format";
 import { loadAutosave, saveAutosave } from "./storage";
 import { RLE_URL_LIMIT, decodeState, encodeState, type DecodedState, type UrlSnapshot } from "./urlState";
 import { buildPresetList, createRuleEditor, paletteOptionList, type RuleEditorHandle, type SwatchOption } from "./ui";
+import { HighwayDetector } from "./highwayDetector";
+import { ruleFromString, sessionToJSON, sessionFromJSON, downloadText, pickFile, type SessionState } from "./sessionIO";
+import { openRuleDocs, closeRuleDocs } from "./ruleDocs";
 
 const MAX_BATCH = 250_000;
 const INITIAL_SEED = 0x1a2b3c4d;
@@ -52,12 +55,18 @@ let running = false;
 let placeMode = false;
 let cam: Camera = { panX: 0, panY: 0, zoom: DEFAULT_ZOOM };
 let camInit = false;
+let autoPauseOnHighway = false;
+let recording = false;
+let mediaRecorder: MediaRecorder | null = null;
 
 const workingColors = new Uint32Array(32);
 let renderer: Renderer;
 let canvas: HTMLCanvasElement;
 let cssW = 0;
 let cssH = 0;
+
+const highway = new HighwayDetector();
+let highwayStep = 0;
 
 // loop state
 let lastTime = 0;
@@ -135,6 +144,8 @@ function newRun(r: Rule, opts: RunOptions = {}): void {
   ruleNotationEl.textContent = ruleToString(r);
   ruleEditor.refresh();
   updateStatus();
+  highway.reset();
+  updateHighwayBadge();
 }
 
 function setRule(r: Rule, startRunning?: boolean): void {
@@ -167,6 +178,20 @@ function updateStatus(): void {
     sim.ants.length === 0
       ? "no ants"
       : `${live} live${halted > 0 ? ` · ${halted} halted (removed)` : ""}`;
+  updateHighwayBadge();
+}
+
+function updateHighwayBadge(): void {
+  const chip = document.getElementById("st-highway");
+  const val = document.getElementById("st-highway-step");
+  if (!chip || !val) return;
+  if (highway.isHighway) {
+    chip.classList.remove("hidden");
+    val.textContent = fmtInt(highway.onsetStep);
+    chip.title = `Highway detected at step ${fmtInt(highway.onsetStep)} — auto-pause optional`;
+  } else {
+    chip.classList.add("hidden");
+  }
 }
 
 function updatePlayButton(): void {
@@ -214,6 +239,14 @@ function frame(now: number): void {
       running = false;
       updatePlayButton();
       toast("All ants halted.");
+    }
+    if (executed > 0 && sim.ants.length > 0 && sim.ants[0] && !sim.ants[0].halted) {
+      highway.sample(sim.ants[0], sim.stepCount);
+      if (highway.isHighway && autoPauseOnHighway && running) {
+        running = false;
+        updatePlayButton();
+        toast(`Highway detected at step ${fmtInt(highway.onsetStep)} — paused`);
+      }
     }
   }
 
@@ -669,6 +702,16 @@ function wireButtons(): void {
 
   $("btnPermalink").addEventListener("click", () => copyPermalink());
   $("btnPNG").addEventListener("click", exportPNG);
+  $("btnRecord").addEventListener("click", () => {
+    if (recording) stopRecording();
+    else startRecording();
+  });
+  $("btnTheme").addEventListener("click", toggleTheme);
+  $("btnJSON").addEventListener("click", exportJSON);
+  $("btnLoadJSON").addEventListener("click", () => {
+    void importJSON();
+  });
+  $("btnDocs").addEventListener("click", () => openRuleDocs());
 
   const help = $("help");
   $("btnHelp").addEventListener("click", () => {
@@ -686,6 +729,100 @@ function wireButtons(): void {
     panel.classList.remove("open");
     panelToggle.setAttribute("aria-expanded", "false");
   });
+}
+
+function exportJSON(): void {
+  const state: SessionState = {
+    v: 1,
+    rule: ruleToString(rule),
+    ants: sim.ants.filter((a) => !a.halted).map((a) => ({ x: a.x, y: a.y, dir: a.dir, state: a.state })),
+    steps: sim.stepCount,
+    camera: { x: cam.panX, y: cam.panY, zoom: cam.zoom },
+    seed,
+    palette: paletteId,
+  };
+  downloadText(`langtons-ant-${toB36(sim.stepCount)}.json`, sessionToJSON(state));
+  toast("Session exported");
+}
+
+async function importJSON(): Promise<void> {
+  let text: string;
+  try {
+    text = await pickFile();
+  } catch (err) {
+    toast("Import cancelled");
+    return;
+  }
+  let state: SessionState;
+  try {
+    state = sessionFromJSON(text);
+  } catch (err) {
+    toast("Invalid session file");
+    return;
+  }
+  const r = ruleFromString(state.rule);
+  newRun(r, { ants: state.ants, steps: 0, running: false });
+  if (state.steps > 0) sim.advance(state.steps);
+  cam = { panX: state.camera.x, panY: state.camera.y, zoom: state.camera.zoom };
+  refreshCam();
+  seed = state.seed;
+  rng = mulberry32(seed);
+  paletteId = state.palette;
+  applyPaletteToRenderer();
+  persist();
+  toast(`Session imported (${fmtInt(sim.stepCount)} steps)`);
+}
+
+function startRecording(): void {
+  if (mediaRecorder !== null) return;
+  const stream = (canvas as HTMLCanvasElement & { captureStream: (fps: number) => MediaStream }).captureStream(30);
+  const mime = MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
+    ? "video/webm;codecs=vp9"
+    : "video/webm";
+  mediaRecorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 2_500_000 });
+  const chunks: Blob[] = [];
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data.size > 0) chunks.push(e.data);
+  };
+  mediaRecorder.onstop = () => {
+    const blob = new Blob(chunks, { type: mime });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `langtons-ant-${toB36(sim.stepCount)}.webm`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 5000);
+    toast("Clip saved");
+    mediaRecorder = null;
+    recording = false;
+    const btn = document.getElementById("btnRecord");
+    if (btn) btn.textContent = "Record clip";
+  };
+  mediaRecorder.start(100);
+  recording = true;
+  const btn = document.getElementById("btnRecord");
+  if (btn) btn.textContent = "Stop recording";
+  toast("Recording…");
+  const durSel = document.getElementById("recDur") as HTMLSelectElement | null;
+  const dur = durSel ? parseInt(durSel.value, 10) || 5 : 5;
+  window.setTimeout(() => {
+    if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+  }, dur * 1000);
+}
+
+function stopRecording(): void {
+  if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+}
+
+function toggleTheme(): void {
+  const light = document.documentElement.classList.toggle("light");
+  try {
+    localStorage.setItem("la:theme", light ? "light" : "dark");
+  } catch {
+    /* ignore */
+  }
 }
 
 function exportPNG(): void {
@@ -737,8 +874,15 @@ function wireKeyboard(): void {
       case "?":
         $("help").classList.toggle("open");
         break;
+      case "d":
+        openRuleDocs();
+        break;
+      case "t":
+        toggleTheme();
+        break;
       case "Escape":
         $("help").classList.remove("open");
+        closeRuleDocs();
         if (placeMode) {
           placeMode = false;
           const place = $("btnPlace");
@@ -838,6 +982,18 @@ function main(): void {
   applyDecoded();
   const sel = document.getElementById("paletteSelect") as HTMLSelectElement;
   sel.value = paletteId;
+  try {
+    if (localStorage.getItem("la:theme") === "light") document.documentElement.classList.add("light");
+  } catch {
+    /* ignore */
+  }
+  const chk = document.getElementById("chkAutoPause") as HTMLInputElement | null;
+  if (chk) {
+    chk.checked = autoPauseOnHighway;
+    chk.addEventListener("change", () => {
+      autoPauseOnHighway = chk.checked;
+    });
+  }
   requestAnimationFrame(frame);
 }
 

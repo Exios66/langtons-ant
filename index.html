@@ -45,6 +45,7 @@
       <span class="chip"><span class="lbl">ants</span><span class="val" id="st-ants">0</span></span>
       <span class="chip"><span class="lbl">bbox</span><span class="val" id="st-bbox">—</span></span>
       <span class="chip"><span class="lbl">grid</span><span class="val" id="st-mem">0 B</span></span>
+      <span class="chip hidden" id="st-highway"><span class="lbl">highway</span><span class="val" id="st-highway-step">—</span></span>
     </div>
 
     <!-- Transport -->
@@ -71,6 +72,7 @@
       <button id="btnHelp" class="tbtn" aria-label="Help and shortcuts" title="Shortcuts (?)">
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a6 6 0 0 1 6 6c0 2.9-1.8 4.1-3 5-.8.6-1 .9-1 2h-4c0-2.3.6-3.3 2-4.4.9-.7 2-1.4 2-2.6a2 2 0 1 0-4 0H6a6 6 0 0 1 6-6zM10 18h4v3h-4z" /></svg>
       </button>
+      <button id="btnTheme" class="tbtn" aria-label="Toggle light/dark theme" title="Theme (t)">◐</button>
       <label class="speed" for="speed">
         <span id="speedLabel">1,000 steps/s</span>
         <input id="speed" type="range" min="0" max="1" step="0.005" value="0.5" aria-label="Simulation speed, logarithmic 1 to 1,000,000 steps per second" />
@@ -113,6 +115,9 @@
         <label class="row" for="paletteSelect">Palette
           <select id="paletteSelect" aria-label="Color palette"></select>
         </label>
+        <label class="row" for="chkAutoPause">
+          <input id="chkAutoPause" type="checkbox" /> Auto-pause on highway
+        </label>
       </section>
 
       <section aria-labelledby="h-presets">
@@ -125,6 +130,15 @@
         <div class="row btn-row wrap">
           <button id="btnPermalink" class="btn btn-primary">Copy permalink</button>
           <button id="btnPNG" class="btn">Export PNG</button>
+          <button id="btnRecord" class="btn" title="Record a WebM clip of the running sim">Record clip</button>
+          <select id="recDur" class="btn" aria-label="Clip duration in seconds" title="Clip duration">
+            <option value="3">3 s</option>
+            <option value="5" selected>5 s</option>
+            <option value="10">10 s</option>
+          </select>
+          <button id="btnJSON" class="btn" title="Save the full session (rule, ants, steps, camera, seed) as JSON">Export JSON</button>
+          <button id="btnLoadJSON" class="btn" title="Restore a previously saved session">Import JSON</button>
+          <button id="btnDocs" class="btn" title="What is a turmite? (rule-space primer)">Docs</button>
         </div>
         <p class="hint">The run autosaves locally every 5 s; permalinks carry rule, ants, steps, camera, seed and palette in the URL hash.</p>
       </section>

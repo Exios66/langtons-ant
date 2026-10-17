@@ -67,7 +67,10 @@ RUN_BENCH=1 npx vitest run tests/bench.test.ts
 | Determinism | Seeded, fully reproducible runs; the full UI state round-trips through the URL hash (`#r=…&a=…&s=…&z=…&c=…&x=…`) as a permalink |
 | Presets | A curated gallery of verified landmark machines (below), each with notation, milestone and source |
 | Colony mode | Run many ants at once — every ant acts each step in array order |
-| Export / telemetry | Grid export (RLE) and lightweight run telemetry in the UI |
+| Detection | Live highway detector: onset-step badge with optional auto-pause |
+| Documentation | In-app rule-space primer (press `d`); full bibliography in `citations.bib` |
+| Theming | Dark/light theme toggle (`t`) |
+| Export / telemetry | PNG / WebM clip export, full-session JSON import/export, run telemetry |
 
 ## Architecture
 
