@@ -127,13 +127,14 @@ export const PALETTES: Palette[] = [
     backgroundBaseCss: "#123f6d",
   },
   {
-    id: "pastel",
-    name: "Pastel paper",
-    colors: buildColors("#f6f1e7", [
-      "#d95d5d", "#5b9bd5", "#77b79a", "#b388d9", "#e0a45e", "#6fa8a0", "#dd8fa5", "#8fae60",
-      "#d98cb3", "#7fa8c9", "#c9a87f", "#a5b8dd", "#c97f7f", "#88b885", "#d4b96a", "#9a8fc5",
+    id: "starry",
+    name: "Starry Night",
+    colors: buildColors("#0b1d3a", [
+      "#f5c518", "#ffe066", "#fff4c2", "#4a7fb5", "#2e5c8a", "#8fb3d9",
+      "#2d5a3d", "#6b8f5e", "#c9a227", "#f0e68c", "#1a3a5c", "#7fb3e0",
+      "#e8d44d", "#3b6fa0", "#a8c8e8", "#d4af37",
     ]),
-    backgroundBaseCss: "#f6f1e7",
+    backgroundBaseCss: "#0b1d3a",
   },
 ];
 
