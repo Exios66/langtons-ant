@@ -145,8 +145,8 @@ All presets are verifiable landmark machines sourced from Wikipedia [12], the Go
 | Name | Notation | Space | Known milestone |
 | --- | --- | --- | --- |
 | LLRRRLRLRLLR | `LLRRRLRLRLLR` | 1 state × 12 colors, relative | convoluted diagonal highway |
-| Brady Busy Beaver (S = 121) | `{{{1,2,1},{1,1,0}},{{1,4,0},{1,0,0}}}` | 2 states × 2 colors, relative | halts at step 121 |
-| Brady Sigma Champion (37 cells) | `{{{1,8,0},{0,8,1}},{{1,0,0},{1,2,0}}}` | 2 states × 2 colors, relative | halts after 37 painted cells |
+| Brady Busy Beaver (S = 121) | `{{{1,8,0},{0,8,1}},{{1,0,0},{1,2,0}}}` | 2 states × 2 colors, relative | halts at step 121 |
+| Brady Sigma Champion (37 cells) | `{{{1,2,1},{1,1,0}},{{1,4,0},{1,0,0}}}` | 2 states × 2 colors, relative | halts after 37 painted cells |
 | Fay Champion | `{{{1,2,1},{2,4,1},{2,0,0}},{{1,2,0},{1,1,1},{1,4,1}}}` | 2 states × 3 colors, relative | halts after 59,348,218 steps / 888,629 cells |
 | Commons Spiral | `111180121010` | 2 states × 2 colors, relative | intricate spiral texture |
 | Commons Fibonacci Spiral | `181181121010` | 2 states × 2 colors, relative | order that reads like geometry |
