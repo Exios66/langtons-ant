@@ -14,12 +14,29 @@ const COLOR_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const MAX_RLE_COLORS = COLOR_ALPHABET.length;
 
 export function worldToRLE(world: World): string {
+  const rle = tryWorldToRLE(world, Infinity, Infinity);
+  // Unreachable with infinite limits; keeps the return type a plain string.
+  if (rle === null) throw new Error("RLE encoding failed");
+  return rle;
+}
+
+/**
+ * RLE-encode a world unless that would exceed `maxChars` of output or sweep
+ * more than `maxCells` cells of its bounding box; returns null in that case.
+ * The sweep visits every cell of the visited bounding box, which for a
+ * highway-building ant is quadratic in the step count, so callers that only
+ * want a small encoding (permalinks) must bound the work as well as the size.
+ * Throws if the world uses more than 26 colors.
+ */
+export function tryWorldToRLE(world: World, maxChars: number, maxCells: number): string | null {
   const bbox = world.bbox;
   if (bboxIsEmpty(bbox)) return "0,0,0,0!";
   const w = bbox.maxX - bbox.minX + 1;
   const h = bbox.maxY - bbox.minY + 1;
   if (Math.min(w, h) < 1) return "0,0,0,0!";
-  let out = `${bbox.minX},${bbox.minY},${w},${h}!`;
+  if (w * h > maxCells) return null;
+  const parts: string[] = [`${bbox.minX},${bbox.minY},${w},${h}!`];
+  let size = parts[0].length;
   let runColor = -1;
   let runLen = 0;
   const flush = () => {
@@ -27,7 +44,9 @@ export function worldToRLE(world: World): string {
       if (runColor >= MAX_RLE_COLORS) {
         throw new Error(`RLE supports up to ${MAX_RLE_COLORS} colors`);
       }
-      out += (runLen > 1 ? String(runLen) : "") + COLOR_ALPHABET[runColor];
+      const token = (runLen > 1 ? String(runLen) : "") + COLOR_ALPHABET[runColor];
+      parts.push(token);
+      size += token.length;
     }
     runLen = 0;
   };
@@ -38,6 +57,7 @@ export function worldToRLE(world: World): string {
         runLen++;
       } else {
         flush();
+        if (size > maxChars) return null;
         runColor = c;
         runLen = 1;
       }
@@ -45,7 +65,7 @@ export function worldToRLE(world: World): string {
   }
   // A trailing color-0 run is implicit; drop it.
   if (runColor !== 0) flush();
-  return out;
+  return size > maxChars ? null : parts.join("");
 }
 
 export function worldFromRLE(rle: string): World {
@@ -81,6 +101,9 @@ export function worldFromRLE(rle: string): World {
     }
   }
   if (parsed === 0) throw new Error("RLE body has no color runs");
+  // The encoder drops a trailing run of color 0, so a bounding box that ended
+  // in blank cells would shrink on decode; touch the far corner to keep it.
+  if (parsed < w * h) world.set(x0 + w - 1, y0 + h - 1, 0);
   return world;
 }
 
@@ -93,7 +116,7 @@ export interface PackedAntFlags {
 const B64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 const B64URL_REVERSE = new Map<string, number>([...B64URL].map((c, i) => [c, i]));
 
-export function packAnts(ants: Array<{ x: number; y: number } & PackedAntFlags>): string {
+export function packAnts(ants: ReadonlyArray<{ x: number; y: number } & PackedAntFlags>): string {
   const bytes: number[] = [];
   for (const a of ants) {
     const x = a.x & 0xffff;

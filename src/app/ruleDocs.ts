@@ -12,12 +12,11 @@ export const RULE_DOCS_HTML = `
   case. Generalized ants and turmites are exactly as powerful as 1-D Turing
   machines (universality proved for every nontrivial turmite, 2017 [3]).</p>
 
-  <h3>The four notations</h3>
+  <h3>The three notations</h3>
   <ul>
     <li><strong>Ant string</strong> — one letter per color: <code>L</code> (left), <code>R</code> (right), <code>N</code> (no turn), <code>U</code> (U-turn). <code>RL</code> is the classic ant.</li>
-    <li><strong>Triple table</strong> — <code>{{{write, turn, next}, …}, …}</code>, one triple per (state, color). Turn codes: 1 = forward, 2 = right, 4 = U-turn, 8 = left, 0 = halt. Additive codes (e.g. 10) split the ant and are rejected.</li>
+    <li><strong>Triple table</strong> — <code>{{{write, turn, next}, …}, …}</code>, one triple per (state, color). Turn codes: 1 = forward, 2 = right, 4 = U-turn, 8 = left, 0 = halt; compass machines (Perfectionist, Base-&phi; counter) write the letters <code>N E S W</code> instead of a turn code. Additive codes (e.g. 10) split the ant and are rejected.</li>
     <li><strong>Decimal ID</strong> — Wikipedia-Commons 2-color encoding, e.g. <code>111180121010</code>.</li>
-    <li><strong>Absolute headings</strong> — <code>N E S W</code> letters in triples for compass machines (Perfectionist, Base-&phi; counter).</li>
   </ul>
 
   <h3>Chirality convention</h3>

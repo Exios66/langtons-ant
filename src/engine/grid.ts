@@ -11,11 +11,12 @@
  * - The most recently touched chunk is cached: an ant stays inside the same
  *   chunk for ~64 consecutive steps on average.
  *
- * Memory math (1 byte/cell): after 10^8 single-ant steps the visited region
- * is ~10^8 cells -> on the order of 100-200 MB of chunks plus ~24k Map
- * entries. A sparse `Map<packedXY, color>` for the same workload would cost
- * an estimated 4-8 GB (V8 entry overhead): infeasible. Chunked typed arrays
- * are the load-bearing design decision of the whole simulator.
+ * Memory (1 byte/cell, 4 KiB per chunk), measured with
+ * scripts/memory-compare.ts at 20M steps against a `Map<number, number>` of
+ * the same touched cells: RLR 0.35 MB vs 11.3 MB (~33x), LLRR 0.07 MB vs
+ * 2.5 MB (~34x), classic RL 49 MB vs 305 MB (~6x: its highway is a thin
+ * diagonal, so most of each chunk it crosses is untouched). The saving is
+ * real but depends on how compact the pattern is; it is not a fixed factor.
  */
 
 const CHUNK_BITS = 6;

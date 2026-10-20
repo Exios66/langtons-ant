@@ -10,6 +10,14 @@ import { parseAntString, parseDecimal, parseTriples, type Rule } from "./rule";
  * convention: color 0 -> turn RIGHT. Its documented milestone (chaos ->
  * 104-step periodic highway) is 9,977 steps in the Rule Table Repository's
  * count; the app self-measures rather than hard-coding the number.
+ *
+ * Brady's two 2-state 2-color halting champions (S = 121 steps, Sigma = 37
+ * cells) appear in the research dossier with their rule strings the other way
+ * round: replayed here, the rule filed under "S = 121" halts at step 81 with
+ * 37 cells and the one filed under "Sigma = 37" halts at step 121 with 29
+ * cells. The same engine reproduces the dossier's 3-state champion exactly
+ * (21,790 steps, 2,793 cells), so the two rule strings were swapped here to
+ * match their labels; `halts` pins the result in tests/presets.test.ts.
  */
 
 export interface Preset {
@@ -22,6 +30,13 @@ export interface Preset {
   readonly milestone?: string; // known behavioral milestone, if any
   readonly source: string; // URL
   readonly flagship?: boolean;
+  /**
+   * For halting machines cheap enough to run in a test: the engine's
+   * `stepCount` when the last ant halts (the halting step itself is counted)
+   * and the number of non-zero cells left on the grid. tests/presets.test.ts
+   * runs each one and checks it against these numbers.
+   */
+  readonly halts?: { readonly steps: number; readonly cells: number };
 }
 
 export const PRESETS: Preset[] = [
@@ -141,22 +156,24 @@ export const PRESETS: Preset[] = [
   {
     id: "brady-s",
     name: "Brady Busy Beaver (S = 121)",
-    rule: parseTriples("{{{1,2,1},{1,1,0}},{{1,4,0},{1,0,0}}}"),
-    notation: "{{{1,2,1},{1,1,0}},{{1,4,0},{1,0,0}}}",
+    rule: parseTriples("{{{1,8,0},{0,8,1}},{{1,0,0},{1,2,0}}}"),
+    notation: "{{{1,8,0},{0,8,1}},{{1,0,0},{1,2,0}}}",
     space: "2 states × 2 colors, relative",
     blurb: "Halts after 121 steps — the most patient halting 2-state 2-color turmite known.",
     milestone: "halts at step 121",
     source: "https://github.com/gollygang/terminatingturmites",
+    halts: { steps: 121, cells: 29 },
   },
   {
     id: "brady-sigma",
     name: "Brady Sigma Champion (37 cells)",
-    rule: parseTriples("{{{1,8,0},{0,8,1}},{{1,0,0},{1,2,0}}}"),
-    notation: "{{{1,8,0},{0,8,1}},{{1,0,0},{1,2,0}}}",
+    rule: parseTriples("{{{1,2,1},{1,1,0}},{{1,4,0},{1,0,0}}}"),
+    notation: "{{{1,2,1},{1,1,0}},{{1,4,0},{1,0,0}}}",
     space: "2 states × 2 colors, relative",
     blurb: "Halts after painting the most black cells (37) any known 2-state 2-color machine manages.",
     milestone: "halts after 37 painted cells",
     source: "https://github.com/gollygang/terminatingturmites",
+    halts: { steps: 81, cells: 37 },
   },
   {
     id: "fay",
