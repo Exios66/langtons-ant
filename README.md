@@ -168,7 +168,7 @@ Measured with the committed gated benchmark (`RUN_BENCH=1 npx vitest run tests/b
 
 Method: Node v22.14.0, macOS 26.3, Apple M2 (arm64), `console.log` timings — the benchmark asserts nothing numeric so throughput can never become a flaky CI gate. Per-run raw times are printed at INFO level above the mean line.
 
-The throughput *determinism* is pinned separately: after exactly **11,000 classic-ant steps** from a blank grid, the visited region hashes to the committed constant **`6219b3fb`** (FNV-1a) — asserted in `tests/golden.test.ts`. CI (`.github/workflows/ci.yml`) runs the whole suite, golden hash included, on Linux (`ubuntu-latest`) with Node 20 and Node 22 for every push and pull request to `main`; other operating systems are not covered by CI, though the arithmetic is integer-only. The hashed region includes the 104-step periodic highway tail [1][12].
+The throughput *determinism* is pinned separately: after exactly **11,000 classic-ant steps** from a blank grid, the visited region hashes to the committed constant **`6219b3fb`** (FNV-1a) — asserted in `tests/golden.test.ts`. The CI workflow (`.github/workflows/ci.yml`) can run the whole suite, golden hash included, on Linux (`ubuntu-latest`) with Node 20 and Node 22, but it is paused and only runs when started by hand; other operating systems are not covered, though the arithmetic is integer-only. The hashed region includes the 104-step periodic highway tail [1][12].
 
 ## Development
 
@@ -185,7 +185,7 @@ The throughput *determinism* is pinned separately: after exactly **11,000 classi
 │   ├── render/             # palette, dirty-rect Canvas2D renderer
 │   └── engine/             # frozen: rule, grid, simulation, serialize, hash, prng, presets
 ├── tests/                  # vitest: rule, grid, simulation, serialize, golden, highway, restore, presets, bench
-├── .github/workflows/      # ci.yml: typecheck, tests and build on Node 20 and 22
+├── .github/workflows/      # ci.yml: typecheck, tests and build on Node 20 and 22 (manual runs only)
 ├── scripts/                # deploy.mjs (branch-based Pages publish), memory-compare.ts (one-off measurement)
 ├── public/                 # static assets served at site root (social-card.png, .nojekyll)
 ├── vite.config.ts          # base: '/langtons-ant/', es2022 target, sourcemaps
@@ -216,7 +216,7 @@ The throughput *determinism* is pinned separately: after exactly **11,000 classi
 - `tests/highway.test.ts`: the classic ant is detected near step 9,977, never before ~9,000, identically for every frame batch size.
 - `tests/restore.test.ts`: permalink and session-JSON round trips at 100, 1,000 and 20,000 steps compare the grid cell by cell and the ant records; old links and files decode as documented.
 - `tests/presets.test.ts`: the halting presets halt at their documented step with their documented cell count.
-- CI runs `npx tsc --noEmit`, `npm test` and `npm run build` on every push and pull request to `main` (see `.github/workflows/ci.yml`).
+- The CI workflow (`.github/workflows/ci.yml`) runs `npx tsc --noEmit`, `npm test` and `npm run build`, but it is paused: it only runs when started by hand. Run those three commands locally before merging.
 
 ### Deployment
 
