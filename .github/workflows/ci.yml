@@ -1,10 +1,11 @@
 name: CI
 
+# Paused: automatic runs are off while the owner's GitHub Actions is having
+# problems. Run it by hand from the Actions tab, or run the same four commands
+# locally. To switch automatic runs back on, restore the push and pull_request
+# triggers.
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
