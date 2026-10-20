@@ -2,12 +2,29 @@
  * URL-hash permalinks.
  *
  * Contract format (GitHub Pages safe, never sent to a server):
- *   #r=<ruleString>&a=<packedAnts>&s=<stepsB36>&z=<zoom x1000 b36>
- *    &c=<camX b36>,<camY b36>&p=<paletteId>&x=<seed 8 hex>&g=<RLE>
+ *   #r=<ruleString>&a=<packedAnts>&i=<packedInitialAnts>&s=<stepsB36>
+ *    &z=<zoom x1000 b36>&c=<camX b36>,<camY b36>&p=<paletteId>
+ *    &x=<seed 8 hex>&g=<RLE>
  *
  * The rule is the shortest canonical string (ant string, decimal ID, or
- * GollyGang triples). The grid RLE rides along only when its encoding stays
- * under ~1 KB; larger states fall back to rule+ants+steps with a toast.
+ * GollyGang triples). A link reproduces the run it was copied from in one of
+ * three ways, chosen by `planFromUrl` (restore.ts):
+ *
+ *   1. Embedded grid: `g` (RLE of the whole grid, only when it stays under
+ *      ~1 KB) and `a` (the ants as they are now) restore the exact state
+ *      instantly. `s` is just the step counter.
+ *   2. Replay: `i` holds the ants the run STARTED with. A run is a pure
+ *      function of (rule, starting ants, step count), so the app rebuilds it
+ *      by re-simulating `s` steps from an empty grid (capped, see
+ *      REPLAY_STEP_CAP). Used when the grid is too big to embed.
+ *   3. Neither: a run that was edited mid-run (ants added or removed after
+ *      step 0) is not a function of its starting ants, and a big grid cannot
+ *      ride in a URL. The link then carries only `a` + `s`; restoring it puts
+ *      those ants on an EMPTY grid and the app says so. Links written before
+ *      replay support (no `i`) with s > 0 and no `g` decode the same way.
+ *
+ * `i` is also written next to `g` whenever the run is replayable, so a link
+ * that was restored from an embedded grid can be re-shared after running on.
  * All writes use history.replaceState — never pushState.
  */
 
@@ -18,14 +35,44 @@ import {
   fromB36,
   packAnts,
   toB36,
+  tryWorldToRLE,
   unpackAnts,
   worldFromRLE,
-  worldToRLE,
 } from "../engine/serialize";
 import { clampZoom } from "./camera";
 import { PALETTES } from "../render/palette";
 
 export const RLE_URL_LIMIT = 900;
+/**
+ * Bounding-box area above which no grid is serialized: sweeping it is the
+ * expensive part, and a region this large essentially never fits the limit.
+ */
+export const RLE_MAX_CELLS = 4_000_000;
+
+/** Ant records as stored in links and session files. */
+export interface AntRecord {
+  x: number;
+  y: number;
+  dir: number;
+  state: number;
+}
+
+/** Positions are packed as signed 16-bit values; anything else would wrap. */
+export function antsFitPacking(ants: ReadonlyArray<AntRecord>): boolean {
+  return ants.every(
+    (a) =>
+      Number.isInteger(a.x) &&
+      Number.isInteger(a.y) &&
+      a.x >= -32768 &&
+      a.x <= 32767 &&
+      a.y >= -32768 &&
+      a.y <= 32767 &&
+      a.dir >= 0 &&
+      a.dir <= 3 &&
+      a.state >= 0 &&
+      a.state <= 31,
+  );
+}
 
 export interface UrlSnapshot {
   rule: Rule;
@@ -39,6 +86,14 @@ export interface UrlSnapshot {
   seed: number;
   paletteId: string;
   world: World | null;
+  /**
+   * The ants this run started with, or null when the run is not a pure
+   * function of them (ants were added/removed after step 0). Without it a
+   * link can only carry the grid, and only when that is small.
+   */
+  initialAnts?: ReadonlyArray<AntRecord> | null;
+  /** Largest grid RLE (chars) to embed; defaults to RLE_URL_LIMIT. */
+  rleLimit?: number;
 }
 
 export interface DecodedState {
@@ -46,6 +101,8 @@ export interface DecodedState {
   ants: Array<{ x: number; y: number; dir: number; state: number }>;
   /** True when an `a=` key was present (vs. absent → default origin ant). */
   antsSpecified: boolean;
+  /** Ants the run started with (`i=`), or null when the link has none. */
+  initialAnts: AntRecord[] | null;
   steps: number;
   zoom: number;
   centerX: number;
@@ -90,14 +147,33 @@ function seedFromHex(s: string): number | null {
 export function encodeState(snap: UrlSnapshot): string {
   const parts: string[] = [];
   parts.push(`r=${ruleToString(snap.rule)}`);
+
+  let rle: string | null = null;
+  if (snap.world !== null) {
+    try {
+      const r = tryWorldToRLE(snap.world, snap.rleLimit ?? RLE_URL_LIMIT, RLE_MAX_CELLS);
+      if (r !== null && r.length > 0) rle = r;
+    } catch {
+      // >26 colors cannot be RLE-encoded; fall back to replay (or approximate).
+    }
+  }
+  const recipe =
+    snap.initialAnts !== undefined && snap.initialAnts !== null && antsFitPacking(snap.initialAnts)
+      ? snap.initialAnts
+      : null;
+
+  // Current ants are written when they are the state (embedded grid) or the
+  // best available approximation (no grid, no replay recipe). With a replay
+  // recipe and no grid they would be redundant, so they are omitted.
   const live = snap.ants.filter((a) => !a.halted);
-  if (live.length > 0) {
+  if ((rle !== null || recipe === null) && live.length > 0) {
     try {
       parts.push(`a=${packAnts(live)}`);
     } catch {
       // Malformed ant records are silently skipped; rule still round-trips.
     }
   }
+  if (recipe !== null) parts.push(`i=${packAnts(recipe)}`);
   parts.push(`s=${toB36(Math.max(0, Math.round(snap.steps)))}`);
   parts.push(`z=${toB36(Math.round(clampZoom(snap.zoom) * 1000))}`);
   parts.push(`c=${toB36(Math.round(snap.centerX))},${toB36(Math.round(snap.centerY))}`);
@@ -105,16 +181,7 @@ export function encodeState(snap: UrlSnapshot): string {
     parts.push(`p=${snap.paletteId}`);
   }
   parts.push(`x=${seedToHex(snap.seed)}`);
-  if (snap.world !== null) {
-    try {
-      const rle = worldToRLE(snap.world);
-      if (rle.length > 0 && rle.length <= RLE_URL_LIMIT) {
-        parts.push(`g=${rle}`);
-      }
-    } catch {
-      // >26 colors cannot be RLE-encoded; a gridless link is still valid.
-    }
-  }
+  if (rle !== null) parts.push(`g=${rle}`);
   return parts.join("&");
 }
 
@@ -146,6 +213,7 @@ export function decodeState(query: string): DecodedState | null {
   let rule: Rule | null = null;
   let ants: Array<{ x: number; y: number; dir: number; state: number }> = [];
   let antsSpecified = false;
+  let initialAnts: AntRecord[] | null = null;
   let steps = 0;
   let zoom = -1;
   let centerX = 0;
@@ -170,6 +238,14 @@ export function decodeState(query: string): DecodedState | null {
           ants = unpackAnts(value);
         } catch {
           ants = [];
+        }
+        break;
+      }
+      case "i": {
+        try {
+          initialAnts = unpackAnts(value);
+        } catch {
+          initialAnts = null;
         }
         break;
       }
@@ -215,5 +291,5 @@ export function decodeState(query: string): DecodedState | null {
   }
 
   if (rule === null) return null;
-  return { rule, ants, antsSpecified, steps, zoom, centerX, centerY, seed, paletteId, world };
+  return { rule, ants, antsSpecified, initialAnts, steps, zoom, centerX, centerY, seed, paletteId, world };
 }

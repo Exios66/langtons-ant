@@ -15,7 +15,7 @@ import { PRESETS, type Preset } from "../engine/presets";
 import { mulberry32 } from "../engine/prng";
 import { ruleToString, mirrorRule, type Rule } from "../engine/rule";
 import { Simulation } from "../engine/simulation";
-import { toB36, worldToRLE } from "../engine/serialize";
+import { toB36 } from "../engine/serialize";
 import { DEFAULT_PALETTE_ID, PALETTES, hueSpreadPacked, packedToCss, paletteById } from "../render/palette";
 import { Renderer } from "../render/renderer";
 import {
@@ -31,16 +31,28 @@ import {
 } from "./camera";
 import { fmtBytes, fmtInt } from "./format";
 import { loadAutosave, saveAutosave } from "./storage";
-import { RLE_URL_LIMIT, decodeState, encodeState, type DecodedState, type UrlSnapshot } from "./urlState";
+import {
+  decodeState,
+  encodeState,
+  type AntRecord,
+  type DecodedState,
+  type UrlSnapshot,
+} from "./urlState";
+import { REPLAY_STEP_CAP, planFromSession, planFromUrl, type RestorePlan } from "./restore";
 import { buildPresetList, createRuleEditor, paletteOptionList, type RuleEditorHandle, type SwatchOption } from "./ui";
 import { HighwayDetector } from "./highwayDetector";
-import { ruleFromString, sessionToJSON, sessionFromJSON, downloadText, pickFile, type SessionState } from "./sessionIO";
+import { ruleFromString, sessionToJSON, sessionFromJSON, makeSession, downloadText, pickFile } from "./sessionIO";
 import { openRuleDocs, closeRuleDocs } from "./ruleDocs";
 
 const MAX_BATCH = 250_000;
 const INITIAL_SEED = 0x1a2b3c4d;
 const PERSIST_INTERVAL_MS = 5000;
 const STATUS_INTERVAL_MS = 200;
+/** Replay budget per frame (ms) and slice size (steps) while re-simulating a saved run. */
+const REPLAY_FRAME_MS = 10;
+const REPLAY_SLICE = 20_000;
+/** Autosave may embed a bigger grid than a URL can (localStorage, not the address bar). */
+const AUTOSAVE_RLE_LIMIT = 500_000;
 
 // ------------------------------------------------------------------- state
 
@@ -56,6 +68,15 @@ let placeMode = false;
 let cam: Camera = { panX: 0, panY: 0, zoom: DEFAULT_ZOOM };
 let camInit = false;
 let autoPauseOnHighway = false;
+/**
+ * The ants the current run started with, while the run is still a pure
+ * function of them (rule + these ants + stepCount). Null once ants were
+ * added/removed after step 0: such a run can only be shared with its grid.
+ */
+let recipe: AntRecord[] | null = null;
+/** Absolute step count a saved run is being re-simulated to; 0 when idle. */
+let replayTarget = 0;
+let replayRunAfter = true;
 let recording = false;
 let mediaRecorder: MediaRecorder | null = null;
 
@@ -125,9 +146,15 @@ function refreshCam(): void {
 
 interface RunOptions {
   world?: World;
-  ants?: Array<{ x: number; y: number; dir: number; state: number }>;
+  ants?: Array<AntRecord & { halted?: boolean }>;
   steps?: number;
   running?: boolean;
+  /** Starting ants of the restored run; defaults to `ants` for a fresh run at step 0. */
+  recipe?: AntRecord[] | null;
+}
+
+function cloneAnts(ants: ReadonlyArray<AntRecord>): AntRecord[] {
+  return ants.map((a) => ({ x: a.x, y: a.y, dir: a.dir, state: a.state }));
 }
 
 function newRun(r: Rule, opts: RunOptions = {}): void {
@@ -136,7 +163,17 @@ function newRun(r: Rule, opts: RunOptions = {}): void {
   sim = new Simulation(r, world);
   if (opts.steps !== undefined) sim.stepCount = opts.steps;
   const ants = opts.ants ?? [{ x: 0, y: 0, dir: 1, state: 0 }];
-  for (const a of ants) sim.addAnt(a.x, a.y, a.dir, a.state);
+  for (const a of ants) {
+    const ant = sim.addAnt(a.x, a.y, a.dir, a.state);
+    if (a.halted) ant.halted = true;
+  }
+  recipe =
+    opts.recipe !== undefined
+      ? opts.recipe
+      : opts.world === undefined && (opts.steps ?? 0) === 0
+        ? cloneAnts(ants)
+        : null;
+  replayTarget = 0;
   if (opts.running !== undefined) running = opts.running;
   renderer.setSim(sim);
   if (!bboxIsEmpty(world.bbox)) renderer.repaintWorldChunks();
@@ -162,7 +199,10 @@ function stepsPerSec(): number {
 }
 
 function updateStatus(): void {
-  $("st-steps").textContent = fmtInt(sim.stepCount);
+  $("st-steps").textContent =
+    replayTarget > 0
+      ? `${fmtInt(sim.stepCount)} / ${fmtInt(replayTarget)} replaying`
+      : fmtInt(sim.stepCount);
   const rate = running ? (emaRate ?? 0) : 0;
   $("st-rate").textContent = fmtInt(rate);
   $("st-fps").textContent = String(Math.round(emaFps ?? 0));
@@ -203,6 +243,60 @@ function updatePlayButton(): void {
   btnPlay.setAttribute("aria-pressed", running ? "true" : "false");
 }
 
+// ------------------------------------------------------------------ replay
+
+/**
+ * Re-simulate a saved run toward `replayTarget`, a time-boxed slice per frame
+ * so the page stays responsive and the run is visibly rebuilt (the step
+ * counter shows progress). Steps go through the highway detector, so a
+ * replayed run recovers the same onset as the original.
+ */
+function stepReplay(): void {
+  const t0 = performance.now();
+  do {
+    const want = Math.min(REPLAY_SLICE, replayTarget - sim.stepCount);
+    const ran = want > 0 ? highway.advance(sim, want) : 0;
+    if (ran < want || sim.stepCount >= replayTarget) {
+      finishReplay(ran < want);
+      return;
+    }
+  } while (performance.now() - t0 < REPLAY_FRAME_MS && sim.changedCount < MAX_BATCH);
+}
+
+function finishReplay(halted: boolean): void {
+  replayTarget = 0;
+  running = replayRunAfter && sim.liveCount > 0;
+  updatePlayButton();
+  updateStatus();
+  toast(halted ? `Replay stopped at step ${fmtInt(sim.stepCount)}: all ants halted` : `Replayed ${fmtInt(sim.stepCount)} steps`);
+  persist();
+}
+
+/** True (with a toast) while a saved run is still being rebuilt; edits would corrupt it. */
+function busyReplaying(): boolean {
+  if (replayTarget === 0) return false;
+  toast("Still replaying the saved run…");
+  return true;
+}
+
+/** Apply a restore plan: place the grid/ants, then (for replays) start re-simulating. */
+function applyPlan(plan: RestorePlan, runAfter: boolean): void {
+  const replaying = plan.replaySteps > 0;
+  newRun(plan.rule, {
+    world: plan.world ?? undefined,
+    ants: plan.ants,
+    steps: plan.stepCount,
+    recipe: plan.recipe,
+    running: replaying ? false : runAfter,
+  });
+  if (replaying) {
+    replayTarget = plan.stepCount + plan.replaySteps;
+    replayRunAfter = runAfter;
+    toast(`Replaying ${fmtInt(plan.replaySteps)} steps…`);
+  }
+  if (plan.message !== null) toast(plan.message);
+}
+
 // ------------------------------------------------------------------- loop
 
 function frame(now: number): void {
@@ -217,7 +311,9 @@ function frame(now: number): void {
   if (dt > 50) dt = 50;
   if (dt <= 0) dt = 1;
 
-  if (running && sim.liveCount > 0) {
+  if (replayTarget > 0) {
+    stepReplay();
+  } else if (running && sim.liveCount > 0) {
     // Adaptive governor: grow while frames stay under the ~17 ms deadline
     // (any refresh rate — the batch grows until the frame actually feels
     // the load), shrink proportionally when a frame overruns.
@@ -286,14 +382,21 @@ function snapshot(): UrlSnapshot {
     seed,
     paletteId,
     world: sim.world,
+    initialAnts: recipe,
   };
 }
 
 function persist(): void {
-  const enc = encodeState(snapshot());
+  // Mid-replay the step counter is a partial result; keep the last good save.
+  if (replayTarget > 0) return;
+  // The autosave (localStorage) may embed a grid far bigger than a URL can,
+  // which is the only way to keep a run that was edited mid-run.
+  const snap = snapshot();
+  const enc = encodeState(recipe === null ? { ...snap, rleLimit: AUTOSAVE_RLE_LIMIT } : snap);
   saveAutosave(enc);
+  const urlEnc = recipe === null ? encodeState(snap) : enc;
   try {
-    history.replaceState(null, "", location.pathname + location.search + "#" + enc);
+    history.replaceState(null, "", location.pathname + location.search + "#" + urlEnc);
   } catch {
     // Some browsers reject certain hash payloads silently; autosave still holds state.
   }
@@ -333,42 +436,44 @@ function legacyCopy(text: string): boolean {
   return ok;
 }
 
-function gridTooLarge(): boolean {
-  try {
-    return worldToRLE(sim.world).length > RLE_URL_LIMIT;
-  } catch {
-    return true; // >26 colors cannot be RLE-encoded, among other reasons
-  }
+const DEFAULT_START: AntRecord[] = [{ x: 0, y: 0, dir: 1, state: 0 }];
+
+/** Permalink snapshot of a fresh preset run (step 0: the empty grid is embedded). */
+function presetSnapshot(p: Preset): UrlSnapshot {
+  return {
+    rule: p.rule,
+    ants: DEFAULT_START,
+    steps: 0,
+    zoom: cam.zoom,
+    centerX: worldCenterX(),
+    centerY: worldCenterY(),
+    seed: freshSeed(),
+    paletteId,
+    world: new World(),
+    initialAnts: DEFAULT_START,
+  };
 }
 
-function copyPermalink(preset?: Preset): void {
-  let snap: UrlSnapshot;
-  if (preset !== undefined) {
-    snap = {
-      rule: preset.rule,
-      ants: [{ x: 0, y: 0, dir: 1, state: 0 }],
-      steps: 0,
-      zoom: cam.zoom,
-      centerX: worldCenterX(),
-      centerY: worldCenterY(),
-      seed: freshSeed(),
-      paletteId,
-      world: new World(),
-    };
-  } else {
-    snap = snapshot();
-  }
-  const tooBig = preset === undefined && gridTooLarge();
-  if (tooBig) {
-    // Gridless link: rule + ants + steps still replay by re-simulation.
-    snap.world = null;
-  }
-  const url = location.origin + location.pathname + location.search + "#" + encodeState(snap);
+function copyPermalink(): void {
+  if (busyReplaying()) return;
+  const enc = encodeState(snapshot());
+  // Decode what we are about to hand out, so the toast says what opening it will do.
+  const back = decodeState("#" + enc);
+  const plan = back === null ? null : planFromUrl(back);
+  const url = location.origin + location.pathname + location.search + "#" + enc;
   void copyText(url).then((ok) => {
-    if (ok) {
-      toast(tooBig ? "Link copied — state too large for a link" : "Permalink copied");
-    } else {
+    if (!ok) {
       toast("Copy failed — the address bar holds the current link");
+    } else if (plan === null || plan.kind === "approximate") {
+      toast(
+        "Link copied, but it cannot reproduce this run: ants were edited mid-run and the grid is too large for a link. Use Export session (JSON) to share it.",
+      );
+    } else if (plan.kind === "refused") {
+      toast(`Link copied, but this run is past the ${fmtInt(REPLAY_STEP_CAP)}-step replay limit: it will open from step 0.`);
+    } else if (plan.kind === "replay" && plan.replaySteps > 0) {
+      toast(`Permalink copied — opening it replays ${fmtInt(plan.replaySteps)} steps`);
+    } else {
+      toast("Permalink copied");
     }
     persist();
   });
@@ -376,20 +481,34 @@ function copyPermalink(preset?: Preset): void {
 
 // ----------------------------------------------------------------- colony
 
+/**
+ * Record that the colony was edited. At step 0 the edit just changes the
+ * starting ants; later it makes the run no longer a function of them, so
+ * shared links and sessions must carry the grid instead of a replay recipe.
+ */
+function noteAntEdit(): void {
+  recipe = sim.stepCount === 0 ? cloneAnts(sim.ants) : null;
+}
+
 function addAntAtCenter(): void {
+  if (busyReplaying()) return;
   sim.addAnt(Math.round(worldCenterX()), Math.round(worldCenterY()), 1);
+  noteAntEdit();
   updateStatus();
   persist();
 }
 
 function clearAnts(): void {
+  if (busyReplaying()) return;
   sim.clearAnts();
+  noteAntEdit();
   updateStatus();
   persist();
   toast("Colony cleared");
 }
 
 function seedStrays(n: number): void {
+  if (busyReplaying()) return;
   seed = freshSeed();
   rng = mulberry32(seed);
   const w = canvas.clientWidth;
@@ -407,11 +526,13 @@ function seedStrays(n: number): void {
     const dir = Math.floor(rng() * 4) & 3;
     sim.addAnt(x, y, dir);
   }
+  noteAntEdit();
   persist();
   toast(`Seeded ${n} strays · seed 0x${(seed >>> 0).toString(16).padStart(8, "0")}`);
 }
 
 function toggleAntAt(sx: number, sy: number): void {
+  if (busyReplaying()) return;
   const wx = screenToWorldX(cam, sx);
   const wy = screenToWorldY(cam, sy);
   const idx = sim.ants.findIndex((a) => a.x === wx && a.y === wy);
@@ -420,6 +541,7 @@ function toggleAntAt(sx: number, sy: number): void {
   } else {
     sim.addAnt(wx, wy, 1);
   }
+  noteAntEdit();
   updateStatus();
   persist();
 }
@@ -427,13 +549,14 @@ function toggleAntAt(sx: number, sy: number): void {
 // ---------------------------------------------------------------- actions
 
 function togglePlay(): void {
+  if (busyReplaying()) return;
   running = !running;
   updatePlayButton();
   persist();
 }
 
 function stepOnce(): void {
-  if (sim.liveCount === 0) return;
+  if (busyReplaying() || sim.liveCount === 0) return;
   highway.advance(sim, 1);
   if (sim.liveCount === 0) {
     running = false;
@@ -445,6 +568,7 @@ function stepOnce(): void {
 }
 
 function jump10k(): void {
+  if (busyReplaying()) return;
   const executed = highway.advance(sim, 10_000);
   if (executed > 0 && sim.liveCount === 0) {
     running = false;
@@ -648,18 +772,7 @@ function wirePanel(): void {
       toast(`Loaded “${p.name}”`);
     },
     onPermalink: (p) => {
-      const snap: UrlSnapshot = {
-        rule: p.rule,
-        ants: [{ x: 0, y: 0, dir: 1, state: 0 }],
-        steps: 0,
-        zoom: cam.zoom,
-        centerX: worldCenterX(),
-        centerY: worldCenterY(),
-        seed: freshSeed(),
-        paletteId,
-        world: new World(),
-      };
-      const url = location.origin + location.pathname + location.search + "#" + encodeState(snap);
+      const url = location.origin + location.pathname + location.search + "#" + encodeState(presetSnapshot(p));
       void copyText(url).then((ok) => toast(ok ? "Preset link copied" : "Copy failed"));
       persist();
     },
@@ -702,7 +815,7 @@ function wireButtons(): void {
     toast("Chirality mirrored");
   });
 
-  $("btnPermalink").addEventListener("click", () => copyPermalink());
+  $("btnPermalink").addEventListener("click", copyPermalink);
   $("btnPNG").addEventListener("click", exportPNG);
   $("btnRecord").addEventListener("click", () => {
     if (recording) stopRecording();
@@ -734,17 +847,18 @@ function wireButtons(): void {
 }
 
 function exportJSON(): void {
-  const state: SessionState = {
-    v: 1,
-    rule: ruleToString(rule),
-    ants: sim.ants.filter((a) => !a.halted).map((a) => ({ x: a.x, y: a.y, dir: a.dir, state: a.state })),
-    steps: sim.stepCount,
+  if (busyReplaying()) return;
+  const state = makeSession(sim, recipe, {
     camera: { x: cam.panX, y: cam.panY, zoom: cam.zoom },
     seed,
     palette: paletteId,
-  };
+  });
   downloadText(`langtons-ant-${toB36(sim.stepCount)}.json`, sessionToJSON(state));
-  toast("Session exported");
+  if (state.grid === null && state.initialAnts === null) {
+    toast("Session exported, but without its grid (too large) — importing it will not reproduce the grid");
+  } else {
+    toast("Session exported");
+  }
 }
 
 async function importJSON(): Promise<void> {
@@ -755,16 +869,16 @@ async function importJSON(): Promise<void> {
     toast("Import cancelled");
     return;
   }
-  let state: SessionState;
+  let state: ReturnType<typeof sessionFromJSON>;
   try {
     state = sessionFromJSON(text);
   } catch (err) {
     toast("Invalid session file");
     return;
   }
-  const r = ruleFromString(state.rule);
-  newRun(r, { ants: state.ants, steps: 0, running: false });
-  if (state.steps > 0) sim.advance(state.steps);
+  const plan = planFromSession(state, ruleFromString(state.rule));
+  // The imported setup replaces the current run; nothing is advanced a second time.
+  applyPlan(plan, false);
   cam = { panX: state.camera.x, panY: state.camera.y, zoom: state.camera.zoom };
   refreshCam();
   seed = state.seed;
@@ -772,7 +886,7 @@ async function importJSON(): Promise<void> {
   paletteId = state.palette;
   applyPaletteToRenderer();
   persist();
-  toast(`Session imported (${fmtInt(sim.stepCount)} steps)`);
+  if (plan.replaySteps === 0) toast(`Session imported (${fmtInt(sim.stepCount)} steps)`);
 }
 
 function startRecording(): void {
@@ -929,14 +1043,26 @@ function applyDecoded(): void {
     d = decodeState(hash);
   }
   let savedApplied = false;
-  if (d === null) {
-    const saved = loadAutosave();
-    if (saved !== null) {
-      d = decodeState("#" + saved);
-      savedApplied = d !== null;
+  const saved = loadAutosave();
+  let plan: RestorePlan | null = d === null ? null : planFromUrl(d);
+  if (saved !== null && (d === null || (plan !== null && plan.kind === "approximate"))) {
+    const sd = decodeState("#" + saved);
+    if (sd !== null && d === null) {
+      d = sd;
+      plan = planFromUrl(sd);
+      savedApplied = true;
+    } else if (sd !== null && d !== null) {
+      // The address bar could not hold the grid of a run edited mid-run; the
+      // autosave can. Use it only if it is the same run (same rule and step).
+      const sp = planFromUrl(sd);
+      if (sp.kind === "embedded" && sd.steps === d.steps && ruleToString(sd.rule) === ruleToString(d.rule)) {
+        d = sd;
+        plan = sp;
+        savedApplied = true;
+      }
     }
   }
-  if (d === null) {
+  if (d === null || plan === null) {
     // First visit — Tier 0: fresh flagship ant, already running.
     camInit = false;
     cam = { panX: 0, panY: 0, zoom: DEFAULT_ZOOM };
@@ -955,17 +1081,8 @@ function applyDecoded(): void {
   seed = d.seed ?? INITIAL_SEED;
   rng = mulberry32(seed);
   paletteId = d.paletteId ?? DEFAULT_PALETTE_ID;
-  const ants =
-    d.antsSpecified && d.ants.length > 0
-      ? d.ants
-      : [{ x: 0, y: 0, dir: 1, state: 0 }];
-  newRun(d.rule, {
-    world: d.world ?? undefined,
-    ants,
-    steps: d.steps,
-    running: true,
-  });
-  if (savedApplied) {
+  applyPlan(plan, true);
+  if (savedApplied && plan.message === null && plan.replaySteps === 0) {
     toast("Session restored — Reset for a fresh ant");
   }
 }
