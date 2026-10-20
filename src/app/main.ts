@@ -66,7 +66,8 @@ let cssW = 0;
 let cssH = 0;
 
 const highway = new HighwayDetector();
-let highwayStep = 0;
+/** detectedStep already announced by the auto-pause toast (so resuming does not re-pause). */
+let highwayAnnounced = -1;
 
 // loop state
 let lastTime = 0;
@@ -145,6 +146,7 @@ function newRun(r: Rule, opts: RunOptions = {}): void {
   ruleEditor.refresh();
   updateStatus();
   highway.reset();
+  highwayAnnounced = -1;
   updateHighwayBadge();
 }
 
@@ -188,7 +190,7 @@ function updateHighwayBadge(): void {
   if (highway.isHighway) {
     chip.classList.remove("hidden");
     val.textContent = fmtInt(highway.onsetStep);
-    chip.title = `Highway detected at step ${fmtInt(highway.onsetStep)} — auto-pause optional`;
+    chip.title = `Highway onset ≈ step ${fmtInt(highway.onsetStep)} (detected at step ${fmtInt(highway.detectedStep)}) — auto-pause optional`;
   } else {
     chip.classList.add("hidden");
   }
@@ -233,20 +235,20 @@ function frame(now: number): void {
       carry = owed - n;
     }
     let executed = 0;
-    if (n > 0) executed = sim.advance(n);
+    // The detector slices the batch at its step-aligned sampling grid, so
+    // detection does not depend on the frame batch size.
+    if (n > 0) executed = highway.advance(sim, n);
     windowSteps += executed;
     if (executed > 0 && sim.liveCount === 0) {
       running = false;
       updatePlayButton();
       toast("All ants halted.");
     }
-    if (executed > 0 && sim.ants.length > 0 && sim.ants[0] && !sim.ants[0].halted) {
-      highway.sample(sim.ants[0], sim.stepCount);
-      if (highway.isHighway && autoPauseOnHighway && running) {
-        running = false;
-        updatePlayButton();
-        toast(`Highway detected at step ${fmtInt(highway.onsetStep)} — paused`);
-      }
+    if (highway.isHighway && autoPauseOnHighway && running && highwayAnnounced !== highway.detectedStep) {
+      highwayAnnounced = highway.detectedStep;
+      running = false;
+      updatePlayButton();
+      toast(`Highway onset ≈ step ${fmtInt(highway.onsetStep)} — paused`);
     }
   }
 
@@ -432,7 +434,7 @@ function togglePlay(): void {
 
 function stepOnce(): void {
   if (sim.liveCount === 0) return;
-  sim.step();
+  highway.advance(sim, 1);
   if (sim.liveCount === 0) {
     running = false;
     updatePlayButton();
@@ -443,7 +445,7 @@ function stepOnce(): void {
 }
 
 function jump10k(): void {
-  const executed = sim.advance(10_000);
+  const executed = highway.advance(sim, 10_000);
   if (executed > 0 && sim.liveCount === 0) {
     running = false;
     updatePlayButton();
