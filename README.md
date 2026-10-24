@@ -11,9 +11,11 @@
 
 </div>
 
-<p align="center">
-  <img src="public/demo.gif" alt="Langton's ant running: chaos collapses into a periodic highway" width="800" />
-</p>
+<div align="center">
+  <img src="public/demo.gif" alt="Langton's ant running from the live demo: an 8k-step golden chaos cloud collapses into a clean diagonal highway; the HUD shows the detector badge light up (HIGHWAY 9,900) and the run auto-pauses" width="880" />
+  <p><sub><b>The money shot, recorded from the live demo</b> — one ant, four trivial rules: thousands of steps of seeded chaos, then the abrupt collapse into the 104-step periodic highway.
+  <a href="https://exios66.github.io/langtons-ant/#r=RL&amp;a=AAAAAAEA&amp;s=4mp&amp;p=starry">Replay it yourself</a> — same seed, same reveal. Starry Night palette.</sub></p>
+</div>
 
 ## What is this?
 
