@@ -190,12 +190,14 @@ The throughput *determinism* is pinned separately: after exactly **11,000 classi
 │   ├── colony/             # ant-colony simulation (pheromones, castes, economy, combat) and scenarios
 │   ├── render/             # palette, dirty-rect Canvas2D renderer
 │   └── engine/             # frozen: rule, grid, simulation, serialize, hash, prng, presets
-├── tests/                  # vitest: rule, grid, simulation, serialize, golden, highway, restore, presets, bench
-├── .github/workflows/      # ci.yml: typecheck, tests and build on Node 20 and 22 (manual runs only)
+├── tests/                  # vitest: rule, grid, simulation, serialize, golden, highway, restore, presets, colony, format, bench
+│   └── e2e/                # Playwright: end-to-end UI tests against the production build
+├── .github/workflows/      # ci.yml: typecheck, unit tests, build (Node 20 and 22) and browser tests (manual runs only)
 ├── scripts/                # deploy.mjs (branch-based Pages publish), memory-compare.ts (one-off measurement)
 ├── public/                 # static assets served at site root (social-card.png, .nojekyll)
 ├── vite.config.ts          # base: '/langtons-ant/', es2022 target, sourcemaps
-└── vitest.config.ts        # node environment, tests/**/*.test.ts
+├── vitest.config.ts        # node environment, tests/**/*.test.ts
+└── playwright.e2e.config.ts # e2e: serves dist/ with vite preview on port 4175
 ```
 
 </details>
@@ -211,6 +213,7 @@ The throughput *determinism* is pinned separately: after exactly **11,000 classi
 | `npm run build` | `tsc --noEmit` + `vite build` → `dist/` |
 | `npm run preview` | Serve the production build locally |
 | `npm test` / `npm run test:watch` | Vitest suite (the gated bench stays skipped unless `RUN_BENCH=1`) |
+| `npm run test:e2e` | `npm run build`, then the Playwright UI tests in `tests/e2e/` (needs Chromium: `npx playwright install chromium`) |
 | `npm run deploy` | `npm run build`, then publish `dist/` to the `gh-pages` branch via a temporary worktree |
 
 </details>
@@ -222,7 +225,20 @@ The throughput *determinism* is pinned separately: after exactly **11,000 classi
 - `tests/highway.test.ts`: the classic ant is detected near step 9,977, never before ~9,000, identically for every frame batch size.
 - `tests/restore.test.ts`: permalink and session-JSON round trips at 100, 1,000 and 20,000 steps compare the grid cell by cell and the ant records; old links and files decode as documented.
 - `tests/presets.test.ts`: the halting presets halt at their documented step with their documented cell count.
-- The CI workflow (`.github/workflows/ci.yml`) runs `npx tsc --noEmit`, `npm test` and `npm run build`, but it is paused: it only runs when started by hand. Run those three commands locally before merging.
+- `tests/colony.test.ts`: the colony simulation replays identically for a scenario and seed (and differs for another seed); ants forage and deliver food; ants stay in bounds and out of walls in every scenario; rival colonies fight and fighting raises soldiers; walls block and erase clears; plus the chart series compaction and axis scale.
+- `tests/format.test.ts`: compact axis labels, including the carry into the next unit (999,960 → `1M`).
+- `tests/e2e/ui.spec.ts` (Playwright, `npm run test:e2e`): drives the production build in Chromium. It checks:
+  - turmite mode starts centered and running;
+  - an ant added while paused is drawn;
+  - the highway badge appears on the classic ant's highway and only in turmite mode;
+  - mode switching works;
+  - every colony scenario loads and runs;
+  - colony links restore scenario and seed;
+  - the paint cursor follows the active tool;
+  - a fast drag paints an unbroken wall.
+
+  Any page or console error fails the run. To use an already-installed Chromium, set `PW_CHROMIUM_PATH` to its executable.
+- The CI workflow (`.github/workflows/ci.yml`) runs `npx tsc --noEmit`, `npm test` and `npm run build` on Node 20 and 22, plus `npm run test:e2e` in a separate job. It is paused: it only runs when started by hand. Run those commands locally before merging.
 
 ### Deployment
 
@@ -234,7 +250,22 @@ Branch-based GitHub Pages — **no Actions deployment required**:
 
 ## Roadmap
 
-- **M2/M3:** animated GIF/WebM export of run regions; side-by-side rule comparison mode; Playwright visual regression tests; a stricter highway detector (the current one is a drift heuristic and can flag steady drift that is not exactly periodic).
+- **Done since M1:**
+  - colony mode: foraging, castes, nest economy, rival colonies, five scenarios, paint tools, colony links;
+  - live analytics with CSV export for both modes;
+  - minimap, follow camera and afterglow;
+  - end-to-end UI tests with Playwright.
+- **Turmites:**
+  - animated GIF/WebM export of run regions;
+  - side-by-side rule comparison mode;
+  - a stricter highway detector. The current one is a drift heuristic and can flag steady drift that is not exactly periodic.
+- **Colonies:**
+  - carry painted walls and food in colony links and saved sessions (today a link holds only the scenario and seed, so edits are not shared);
+  - colony session import/export;
+  - more scenarios, e.g. obstacle courses and seasonal food.
+- **Both modes:**
+  - react to a pasted link in an open tab (`hashchange`); today a link is read only at page load;
+  - pixel-level visual regression tests on top of the current behavioral UI tests.
 
 ## References
 
