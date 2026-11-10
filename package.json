@@ -13,7 +13,8 @@
     "preview": "vite preview",
     "deploy": "npm run build && node scripts/deploy.mjs",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:e2e": "npm run build && playwright test -c playwright.e2e.config.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.64.1",
