@@ -1527,17 +1527,22 @@ function wireKeyboard(): void {
   });
 }
 
+/** Center the origin once the canvas has a size (after startup or a session restore). */
+function initCamIfNeeded(): void {
+  if (!camInit && cssW > 0) {
+    camInit = true;
+    centerOn(cam, 0, 0, cssW, cssH);
+    refreshCam();
+  }
+}
+
 function wireGlobals(): void {
   const onResize = () => {
     cssW = canvas.clientWidth;
     cssH = canvas.clientHeight;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     renderer.resize(cssW, cssH, dpr);
-    if (!camInit && cssW > 0) {
-      camInit = true;
-      centerOn(cam, 0, 0, cssW, cssH);
-      refreshCam();
-    }
+    initCamIfNeeded();
   };
   window.addEventListener("resize", onResize);
   onResize();
@@ -1626,6 +1631,8 @@ function main(): void {
   applyPaletteToRenderer();
   const colonyReq = parseColonyHash(location.hash);
   applyDecoded(colonyReq !== null);
+  // applyDecoded resets the camera, so the centering done by the first resize is lost.
+  initCamIfNeeded();
   if (colonyReq !== null) setMode("colony", colonyReq);
   const sel = document.getElementById("paletteSelect") as HTMLSelectElement;
   sel.value = paletteId;
