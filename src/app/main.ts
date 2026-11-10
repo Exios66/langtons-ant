@@ -13,7 +13,7 @@
 import { bboxIsEmpty, World, type BBox } from "../engine/grid";
 import { PRESETS, type Preset } from "../engine/presets";
 import { mulberry32 } from "../engine/prng";
-import { ruleToString, mirrorRule, type Rule } from "../engine/rule";
+import { ruleToString, mirrorRule, parseAntString, type Rule } from "../engine/rule";
 import { Simulation } from "../engine/simulation";
 import { toB36 } from "../engine/serialize";
 import { DEFAULT_PALETTE_ID, PALETTES, hueSpreadPacked, packedToCss, paletteById } from "../render/palette";
@@ -43,6 +43,9 @@ import { buildPresetList, createRuleEditor, paletteOptionList, type RuleEditorHa
 import { HighwayDetector } from "./highwayDetector";
 import { ruleFromString, sessionToJSON, sessionFromJSON, makeSession, downloadText, pickFile } from "./sessionIO";
 import { openRuleDocs, closeRuleDocs } from "./ruleDocs";
+import { ColonyMode } from "./colonyMode";
+import { Series } from "./analytics";
+import { LineChart } from "./charts";
 
 const MAX_BATCH = 250_000;
 const INITIAL_SEED = 0x1a2b3c4d;
@@ -79,6 +82,35 @@ let replayTarget = 0;
 let replayRunAfter = true;
 let recording = false;
 let mediaRecorder: MediaRecorder | null = null;
+
+type Mode = "turmite" | "colony";
+let mode: Mode = "turmite";
+let colony: ColonyMode | null = null;
+/** Camera of the mode that is not on screen (`cam` is always the active one). */
+let parkedCam: Camera | null = null;
+/** Camera the view is easing toward (fit, minimap click); null when idle. */
+let camGoal: Camera | null = null;
+let followAnt = false;
+let smoothMotion = true;
+let showMinimap = true;
+let lastMinimapAt = 0;
+let minimapCtx: CanvasRenderingContext2D | null = null;
+const reducedMotion =
+  typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+// Turmite analytics: distance of the ants from where the run started, and
+// painted cells, sampled against the step count.
+/** Above this many chunks the live color scan is skipped (it would cost too much per sample). */
+const SCAN_CHUNK_LIMIT = 600;
+const SAMPLE_MIN_INTERVAL_MS = 100;
+const tSeries = new Series(2, 50);
+let distChart: LineChart | null = null;
+let paintChart: LineChart | null = null;
+let originX = 0;
+let originY = 0;
+let lastSampleAt = 0;
+const colorCounts = new Float64Array(32);
+let colorCountsValid = false;
 
 const workingColors = new Uint32Array(32);
 let renderer: Renderer;
@@ -175,6 +207,16 @@ function newRun(r: Rule, opts: RunOptions = {}): void {
         : null;
   replayTarget = 0;
   if (opts.running !== undefined) running = opts.running;
+  const startAnts = recipe ?? ants;
+  originX = 0;
+  originY = 0;
+  for (const a of startAnts) {
+    originX += a.x / startAnts.length;
+    originY += a.y / startAnts.length;
+  }
+  tSeries.clear();
+  lastSampleAt = 0;
+  colorCountsValid = false;
   renderer.setSim(sim);
   if (!bboxIsEmpty(world.bbox)) renderer.repaintWorldChunks();
   refreshCam();
@@ -199,6 +241,17 @@ function stepsPerSec(): number {
 }
 
 function updateStatus(): void {
+  if (mode === "colony" && colony !== null) {
+    const cs = colony.sim;
+    $("st-steps").textContent = fmtInt(cs.tick);
+    $("st-rate").textContent = fmtInt(colony.running ? colony.rate : 0);
+    $("st-fps").textContent = String(Math.round(emaFps ?? 0));
+    $("st-ants").textContent = fmtInt(cs.n);
+    $("st-food").textContent = cs.endlessFood ? "∞" : fmtInt(cs.totalFood);
+    colony.updatePanel();
+    return;
+  }
+  updateTurmiteAnalytics();
   $("st-steps").textContent =
     replayTarget > 0
       ? `${fmtInt(sim.stepCount)} / ${fmtInt(replayTarget)} replaying`
@@ -237,10 +290,217 @@ function updateHighwayBadge(): void {
 }
 
 function updatePlayButton(): void {
-  iconPlay.toggleAttribute("hidden", running);
-  iconPause.toggleAttribute("hidden", !running);
-  btnPlay.setAttribute("aria-label", running ? "Pause" : "Play");
-  btnPlay.setAttribute("aria-pressed", running ? "true" : "false");
+  const on = mode === "colony" && colony !== null ? colony.running : running;
+  iconPlay.toggleAttribute("hidden", on);
+  iconPause.toggleAttribute("hidden", !on);
+  btnPlay.setAttribute("aria-label", on ? "Pause" : "Play");
+  btnPlay.setAttribute("aria-pressed", on ? "true" : "false");
+}
+
+// --------------------------------------------------------------- analytics
+
+/** Count cells per color over the whole grid (skipped for very large grids). */
+function scanColors(): boolean {
+  if (sim.world.chunkCount > SCAN_CHUNK_LIMIT) return false;
+  colorCounts.fill(0);
+  for (const chunk of sim.world.chunkData()) {
+    for (let i = 0; i < chunk.length; i++) colorCounts[chunk[i]]++;
+  }
+  return true;
+}
+
+/** Record one analytics sample if the run has advanced far enough since the last. */
+function sampleTurmite(now: number): void {
+  if (!tSeries.due(sim.stepCount) || (tSeries.length > 0 && now - lastSampleAt < SAMPLE_MIN_INTERVAL_MS)) return;
+  lastSampleAt = now;
+  let dist = 0;
+  let live = 0;
+  for (const a of sim.ants) {
+    if (a.halted) continue;
+    dist += Math.hypot(a.x - originX, a.y - originY);
+    live++;
+  }
+  colorCountsValid = scanColors();
+  let painted = NaN;
+  if (colorCountsValid) {
+    painted = 0;
+    for (let c = 1; c < colorCounts.length; c++) painted += colorCounts[c];
+  }
+  tSeries.push(sim.stepCount, [live > 0 ? dist / live : NaN, painted]);
+}
+
+function updateTurmiteAnalytics(): void {
+  const marker = highway.isHighway ? { x: highway.onsetStep, label: "highway" } : null;
+  distChart?.setData(tSeries, marker);
+  paintChart?.setData(tSeries, marker);
+  const bar = document.getElementById("colorBar");
+  const info = document.getElementById("colorBarInfo");
+  if (bar === null || info === null) return;
+  if (!colorCountsValid) {
+    bar.replaceChildren();
+    info.textContent =
+      sim.world.chunkCount > SCAN_CHUNK_LIMIT
+        ? `Grid too large to count live (${fmtInt(sim.world.chunkCount)} chunks)`
+        : "No cells painted yet";
+    return;
+  }
+  let painted = 0;
+  for (let c = 1; c < rule.colors; c++) painted += colorCounts[c];
+  const parts: string[] = [];
+  bar.replaceChildren();
+  for (let c = 1; c < rule.colors; c++) {
+    const n = colorCounts[c];
+    if (n === 0) continue;
+    const seg = document.createElement("span");
+    seg.style.flexGrow = String(n);
+    seg.style.background = packedToCss(workingColors[c]);
+    const pct = `${((n / painted) * 100).toFixed(1)}%`;
+    seg.title = `color ${c}: ${fmtInt(n)} cells (${pct})`;
+    bar.appendChild(seg);
+    parts.push(`${c}: ${pct}`);
+  }
+  info.textContent =
+    painted === 0
+      ? "No cells painted yet"
+      : `${fmtInt(painted)} painted cells · ${parts.slice(0, 6).join(" · ")}${parts.length > 6 ? " · …" : ""}`;
+}
+
+// ------------------------------------------------------------------ camera
+
+function isLight(): boolean {
+  return document.documentElement.classList.contains("light");
+}
+
+/** Ease the view toward `goal` (or jump there when motion is reduced). */
+function moveCamTo(goal: Camera): void {
+  if (reducedMotion) {
+    cam.panX = goal.panX;
+    cam.panY = goal.panY;
+    cam.zoom = goal.zoom;
+    camGoal = null;
+    refreshCam();
+  } else {
+    camGoal = goal;
+  }
+}
+
+/** Per-frame camera motion: easing toward a goal, and follow-the-ant. */
+function stepCamera(dt: number): void {
+  if (camGoal !== null) {
+    const k = 1 - Math.exp(-dt / 110);
+    // Interpolate the world point at the screen center, and zoom geometrically.
+    const cx = (cssW / 2 - cam.panX) / cam.zoom;
+    const cy = (cssH / 2 - cam.panY) / cam.zoom;
+    const gx = (cssW / 2 - camGoal.panX) / camGoal.zoom;
+    const gy = (cssH / 2 - camGoal.panY) / camGoal.zoom;
+    const nz = cam.zoom * Math.pow(camGoal.zoom / cam.zoom, k);
+    const nx = cx + (gx - cx) * k;
+    const ny = cy + (gy - cy) * k;
+    const done = Math.abs(Math.log(camGoal.zoom / nz)) < 0.002 && Math.hypot(gx - nx, gy - ny) * nz < 0.5;
+    if (done) {
+      cam.zoom = camGoal.zoom;
+      cam.panX = camGoal.panX;
+      cam.panY = camGoal.panY;
+      camGoal = null;
+    } else {
+      cam.zoom = nz;
+      centerOn(cam, nx, ny, cssW, cssH);
+    }
+    refreshCam();
+  } else if (followAnt && mode === "turmite") {
+    let sx = 0;
+    let sy = 0;
+    let live = 0;
+    for (const a of sim.ants) {
+      if (a.halted) continue;
+      sx += a.x + 0.5;
+      sy += a.y + 0.5;
+      live++;
+    }
+    if (live > 0) {
+      const k = reducedMotion ? 1 : 1 - Math.exp(-dt / 160);
+      const cx = (cssW / 2 - cam.panX) / cam.zoom;
+      const cy = (cssH / 2 - cam.panY) / cam.zoom;
+      centerOn(cam, cx + (sx / live - cx) * k, cy + (sy / live - cy) * k, cssW, cssH);
+      refreshCam();
+    }
+  }
+}
+
+function setFollow(on: boolean): void {
+  followAnt = on;
+  const btn = $("btnFollow");
+  btn.setAttribute("aria-pressed", on ? "true" : "false");
+  if (on) camGoal = null;
+}
+
+function drawMinimap(now: number): void {
+  if (!showMinimap || minimapCtx === null || now - lastMinimapAt < 100) return;
+  lastMinimapAt = now;
+  const c = minimapCtx.canvas;
+  minimapCtx.setTransform(1, 0, 0, 1, 0, 0);
+  renderer.drawMinimap(minimapCtx, c.width, c.height, isLight() ? "#15181e" : "#ffffff");
+}
+
+// -------------------------------------------------------------------- mode
+
+function setMode(next: Mode, opts: { scenario?: string; seed?: number } = {}): void {
+  if (next === "colony" && colony === null) {
+    colony = new ColonyMode(
+      canvas,
+      {
+        toast,
+        changed: (refit) => {
+          if (refit) fitView(true);
+          persist();
+          updateStatus();
+        },
+      },
+      opts.scenario,
+      opts.seed,
+    );
+  } else if (next === "colony" && colony !== null && opts.scenario !== undefined) {
+    colony.restart(opts.scenario, opts.seed ?? colony.seed, false);
+  }
+  const changed = next !== mode;
+  if (changed) {
+    const other = parkedCam;
+    parkedCam = { ...cam };
+    mode = next;
+    camGoal = null;
+    if (other !== null) {
+      cam.panX = other.panX;
+      cam.panY = other.panY;
+      cam.zoom = other.zoom;
+    }
+    if (next === "colony" && other === null) fitView(true);
+  }
+  document.body.dataset.mode = mode;
+  for (const btn of document.querySelectorAll<HTMLElement>("[data-mode-btn]")) {
+    btn.setAttribute("aria-pressed", btn.dataset.modeBtn === mode ? "true" : "false");
+  }
+  $("st-steps-lbl").textContent = mode === "colony" ? "ticks" : "steps";
+  $("st-rate-lbl").textContent = mode === "colony" ? "ticks/s" : "steps/s";
+  $("jumpLabel").textContent = mode === "colony" ? "+1k" : "+10k";
+  canvas.classList.toggle("tooling", mode === "colony" && colony !== null && colony.tool !== "pan");
+  if (mode === "turmite") {
+    renderer.invalidate();
+    refreshCam();
+  } else if (placeMode) {
+    exitPlaceMode();
+  }
+  setSpeed(mode === "colony" && colony !== null ? colony.speedS : speedS);
+  updatePlayButton();
+  updateStatus();
+  persist();
+}
+
+function exitPlaceMode(): void {
+  placeMode = false;
+  const place = $("btnPlace");
+  place.classList.remove("on");
+  place.setAttribute("aria-pressed", "false");
+  canvas.classList.remove("placing");
 }
 
 // ------------------------------------------------------------------ replay
@@ -311,6 +571,20 @@ function frame(now: number): void {
   if (dt > 50) dt = 50;
   if (dt <= 0) dt = 1;
 
+  const fpsNow = 1000 / dt;
+  emaFps = emaFps === null ? fpsNow : emaFps * 0.9 + fpsNow * 0.1;
+  stepCamera(dt);
+
+  if (mode === "colony" && colony !== null) {
+    colony.frame(now, dt);
+    colony.draw(cam, cssW, cssH, Math.min(2, window.devicePixelRatio || 1), isLight());
+    if (now - lastStatusAt >= STATUS_INTERVAL_MS) {
+      lastStatusAt = now;
+      updateStatus();
+    }
+    return;
+  }
+
   if (replayTarget > 0) {
     stepReplay();
   } else if (running && sim.liveCount > 0) {
@@ -354,10 +628,15 @@ function frame(now: number): void {
     windowSteps = 0;
     emaRate = emaRate === null ? inst : emaRate * 0.7 + inst * 0.3;
   }
-  const fpsInst = 1000 / dt;
-  emaFps = emaFps === null ? fpsInst : emaFps * 0.9 + fpsInst * 0.1;
-
+  sampleTurmite(now);
+  // At walking pace the marker glides between cells instead of jumping.
+  renderer.setTween(
+    smoothMotion && !reducedMotion && running && replayTarget === 0 && stepsPerSec() <= 60 && sim.liveCount > 0
+      ? carry
+      : 1,
+  );
   renderer.frame();
+  drawMinimap(now);
 
   if (now - lastStatusAt >= STATUS_INTERVAL_MS) {
     lastStatusAt = now;
@@ -387,6 +666,15 @@ function snapshot(): UrlSnapshot {
 }
 
 function persist(): void {
+  if (mode === "colony" && colony !== null) {
+    // Colony runs are addressed by scenario + seed; the turmite autosave is left alone.
+    try {
+      history.replaceState(null, "", location.pathname + location.search + "#" + colony.hash());
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
   // Mid-replay the step counter is a partial result; keep the last good save.
   if (replayTarget > 0) return;
   // The autosave (localStorage) may embed a grid far bigger than a URL can,
@@ -549,6 +837,11 @@ function toggleAntAt(sx: number, sy: number): void {
 // ---------------------------------------------------------------- actions
 
 function togglePlay(): void {
+  if (mode === "colony" && colony !== null) {
+    colony.running = !colony.running;
+    updatePlayButton();
+    return;
+  }
   if (busyReplaying()) return;
   running = !running;
   updatePlayButton();
@@ -556,6 +849,11 @@ function togglePlay(): void {
 }
 
 function stepOnce(): void {
+  if (mode === "colony" && colony !== null) {
+    colony.stepOnce();
+    updateStatus();
+    return;
+  }
   if (busyReplaying() || sim.liveCount === 0) return;
   highway.advance(sim, 1);
   if (sim.liveCount === 0) {
@@ -568,6 +866,12 @@ function stepOnce(): void {
 }
 
 function jump10k(): void {
+  if (mode === "colony" && colony !== null) {
+    const ran = colony.jump(1000);
+    if (ran < 1000) toast(`Ran ${fmtInt(ran)} ticks (time limit)`);
+    updateStatus();
+    return;
+  }
   if (busyReplaying()) return;
   const executed = highway.advance(sim, 10_000);
   if (executed > 0 && sim.liveCount === 0) {
@@ -580,36 +884,71 @@ function jump10k(): void {
 }
 
 function doReset(): void {
+  if (mode === "colony" && colony !== null) {
+    colony.restart(colony.scenarioId, colony.seed, true);
+    colony.running = true;
+    updatePlayButton();
+    updateStatus();
+    return;
+  }
   newRun(rule, { running: true });
   persist();
 }
 
-function fitView(): void {
+function fitView(instant = false): void {
   let minX = Number.POSITIVE_INFINITY;
   let minY = Number.POSITIVE_INFINITY;
   let maxX = Number.NEGATIVE_INFINITY;
   let maxY = Number.NEGATIVE_INFINITY;
-  const b: BBox = sim.world.bbox;
-  if (!bboxIsEmpty(b)) {
-    minX = b.minX;
-    minY = b.minY;
-    maxX = b.maxX;
-    maxY = b.maxY;
+  if (mode === "colony" && colony !== null) {
+    minX = 0;
+    minY = 0;
+    maxX = colony.sim.w - 1;
+    maxY = colony.sim.h - 1;
+  } else {
+    const b: BBox = sim.world.bbox;
+    if (!bboxIsEmpty(b)) {
+      minX = b.minX;
+      minY = b.minY;
+      maxX = b.maxX;
+      maxY = b.maxY;
+    }
+    for (const a of sim.ants) {
+      if (a.x < minX) minX = a.x;
+      if (a.y < minY) minY = a.y;
+      if (a.x > maxX) maxX = a.x;
+      if (a.y > maxY) maxY = a.y;
+    }
   }
-  for (const a of sim.ants) {
-    if (a.x < minX) minX = a.x;
-    if (a.y < minY) minY = a.y;
-    if (a.x > maxX) maxX = a.x;
-    if (a.y > maxY) maxY = a.y;
+  const goal: Camera = { ...cam };
+  // Leave room for the side panel on wide screens so the pattern is not hidden under it.
+  const panelW = document.body.classList.contains("panel-open") && cssW > 860 ? 388 : 0;
+  fitRect(goal, minX, minY, maxX, maxY, cssW - panelW, cssH, mode === "colony" ? 64 : 72);
+  if (instant) {
+    camGoal = null;
+    cam.panX = goal.panX;
+    cam.panY = goal.panY;
+    cam.zoom = goal.zoom;
+    refreshCam();
+  } else {
+    moveCamTo(goal);
   }
-  fitRect(cam, minX, minY, maxX, maxY, cssW, cssH);
-  refreshCam();
 }
 
 function setSpeed(s: number): void {
-  speedS = clampSpeed(s);
-  (document.getElementById("speed") as HTMLInputElement).value = String(speedS);
-  speedLabelEl.textContent = fmtInt(stepsPerSec()) + " steps/s";
+  const v = clampSpeed(s);
+  (document.getElementById("speed") as HTMLInputElement).value = String(v);
+  if (mode === "colony" && colony !== null) {
+    colony.speedS = v;
+    speedLabelEl.textContent = fmtInt(colony.ticksPerSec()) + " ticks/s";
+  } else {
+    speedS = v;
+    speedLabelEl.textContent = fmtInt(stepsPerSec()) + " steps/s";
+  }
+}
+
+function currentSpeed(): number {
+  return mode === "colony" && colony !== null ? colony.speedS : speedS;
 }
 
 function clampSpeed(s: number): number {
@@ -643,6 +982,8 @@ function wireCanvasEvents(): void {
       // Synthetic or already-released pointers cannot be captured; harmless.
     }
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    camGoal = null;
+    if (pointers.size === 1 && toolActive()) paintAt(e.clientX, e.clientY);
     if (pointers.size === 2) {
       const list = Array.from(pointers.values());
       const t = touchPos(list);
@@ -653,6 +994,7 @@ function wireCanvasEvents(): void {
   });
 
   canvas.addEventListener("pointermove", (e) => {
+    showHoverCell(e.clientX, e.clientY);
     const prev = pointers.get(e.pointerId);
     if (prev === undefined) return;
     const dx = e.clientX - prev.x;
@@ -660,7 +1002,10 @@ function wireCanvasEvents(): void {
     if (dx * dx + dy * dy > 1 || dt0(prev, e) > 6) downMoved = true;
     prev.x = e.clientX;
     prev.y = e.clientY;
-    if (pointers.size === 1 && pinch === null) {
+    if (pointers.size === 1 && pinch === null && toolActive()) {
+      paintAt(e.clientX, e.clientY);
+    } else if (pointers.size === 1 && pinch === null) {
+      if (followAnt && downMoved) setFollow(false);
       panBy(cam, dx, dy);
       refreshCam();
     } else if (pointers.size === 2 && pinch !== null) {
@@ -681,7 +1026,7 @@ function wireCanvasEvents(): void {
     const wasSingle = pointers.size === 1;
     pointers.delete(e.pointerId);
     if (pointers.size < 2) pinch = null;
-    if (wasSingle && !downMoved && placeMode) {
+    if (wasSingle && !downMoved && placeMode && mode === "turmite") {
       toggleAntAt(e.clientX, e.clientY);
     }
   };
@@ -692,12 +1037,43 @@ function wireCanvasEvents(): void {
     "wheel",
     (e) => {
       e.preventDefault();
+      camGoal = null;
       const factor = Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0012));
       zoomAt(cam, e.clientX, e.clientY, cam.zoom * factor);
       refreshCam();
     },
     { passive: false },
   );
+}
+
+/** True while a colony paint tool (not pan) owns single-pointer drags. */
+function toolActive(): boolean {
+  return mode === "colony" && colony !== null && colony.tool !== "pan";
+}
+
+function paintAt(sx: number, sy: number): void {
+  if (colony === null) return;
+  colony.paint((sx - cam.panX) / cam.zoom, (sy - cam.panY) / cam.zoom);
+}
+
+/** Show the cell under the cursor in the status bar. */
+function showHoverCell(sx: number, sy: number): void {
+  const wx = screenToWorldX(cam, sx);
+  const wy = screenToWorldY(cam, sy);
+  const chip = $("st-cell-chip");
+  if (mode === "colony" && colony !== null) {
+    const cs = colony.sim;
+    if (wx < 0 || wy < 0 || wx >= cs.w || wy >= cs.h) {
+      chip.classList.add("hidden");
+      return;
+    }
+    const i = wy * cs.w + wx;
+    const what = cs.walls[i] !== 0 ? "wall" : cs.food[i] > 0 ? `food ${cs.food[i]}` : "open";
+    $("st-cell").textContent = `${wx}, ${wy} · ${what}`;
+  } else {
+    $("st-cell").textContent = `${wx}, ${wy} · color ${sim.world.get(wx, wy)}`;
+  }
+  chip.classList.remove("hidden");
 }
 
 function dt0(prev: { x: number; y: number }, e: PointerEvent): number {
@@ -788,14 +1164,130 @@ function wireButtons(): void {
   $("btnJump").addEventListener("click", jump10k);
   $("btnReset").addEventListener("click", doReset);
   $("btnFit").addEventListener("click", () => {
+    setFollow(false);
     fitView();
     persist();
   });
+  $("btnFollow").addEventListener("click", () => setFollow(!followAnt));
+  $("btnFullscreen").addEventListener("click", () => {
+    if (document.fullscreenElement !== null) void document.exitFullscreen();
+    else void document.documentElement.requestFullscreen?.().catch(() => toast("Fullscreen is not available here"));
+  });
+  for (const btn of document.querySelectorAll<HTMLElement>("[data-mode-btn]")) {
+    btn.addEventListener("click", () => setMode(btn.dataset.modeBtn as Mode));
+  }
+  $("btnRandomRule").addEventListener("click", () => {
+    freshSeed();
+    const r = mulberry32(seed);
+    const n = 2 + Math.floor(r() * 7);
+    let str = "";
+    // An ant string needs both letters, or the ant just circles.
+    do {
+      str = "";
+      for (let i = 0; i < n; i++) str += r() < 0.5 ? "L" : "R";
+    } while (!str.includes("L") || !str.includes("R"));
+    setRule(parseAntString(str), true);
+    toast(`Random rule ${str}`);
+  });
+  $("btnColonyLink").addEventListener("click", () => {
+    if (colony === null) return;
+    const url = location.origin + location.pathname + location.search + "#" + colony.hash();
+    void copyText(url).then((ok) => toast(ok ? "Colony link copied (scenario + seed)" : "Copy failed"));
+  });
+  for (const btn of document.querySelectorAll<HTMLElement>("[data-tool]")) {
+    btn.addEventListener("click", () => {
+      canvas.classList.toggle("tooling", toolActive());
+    });
+  }
+  $("btnTurmiteCSV").addEventListener("click", () => {
+    downloadText(
+      `langtons-ant-${ruleToString(rule)}-${toB36(sim.stepCount)}.csv`,
+      tSeries.toCSV("step", ["distance_from_start", "painted_cells"]),
+      "text/csv",
+    );
+  });
+  canvas.addEventListener("pointerleave", () => $("st-cell-chip").classList.add("hidden"));
+
+  // Display toggles.
+  const toggle = (id: string, apply: (on: boolean) => void): void => {
+    const box = $(id) as HTMLInputElement;
+    box.addEventListener("change", () => apply(box.checked));
+  };
+  toggle("chkSmooth", (on) => {
+    smoothMotion = on;
+  });
+  toggle("chkAfterglow", (on) => renderer.setOptions({ afterglow: on }));
+  toggle("chkGrid", (on) => renderer.setOptions({ gridLines: on }));
+  toggle("chkMinimap", (on) => {
+    showMinimap = on;
+    $("minimap").classList.toggle("hidden", !on);
+  });
+
+  // Overview map: click or drag to move the view there.
+  const mini = $("minimap") as HTMLCanvasElement;
+  minimapCtx = mini.getContext("2d");
+  const miniGo = (e: PointerEvent): void => {
+    const r = mini.getBoundingClientRect();
+    const w = renderer.minimapToWorld(((e.clientX - r.left) / r.width) * mini.width, ((e.clientY - r.top) / r.height) * mini.height);
+    const goal: Camera = { ...cam };
+    centerOn(goal, w.x, w.y, cssW, cssH);
+    setFollow(false);
+    moveCamTo(goal);
+  };
+  mini.addEventListener("pointerdown", (e) => {
+    mini.setPointerCapture(e.pointerId);
+    miniGo(e);
+  });
+  mini.addEventListener("pointermove", (e) => {
+    if (e.buttons !== 0) miniGo(e);
+  });
+
+  // Preset filter.
+  const filter = $("presetFilter") as HTMLInputElement;
+  filter.addEventListener("input", () => {
+    const q = filter.value.trim().toLowerCase();
+    let shown = 0;
+    for (const card of document.querySelectorAll<HTMLElement>("#presetList .preset-card")) {
+      const hit = q === "" || (card.textContent ?? "").toLowerCase().includes(q);
+      card.classList.toggle("hidden", !hit);
+      if (hit) shown++;
+    }
+    $("presetEmpty").classList.toggle("hidden", shown > 0);
+  });
+
+  // Remember which panel sections are collapsed.
+  for (const sec of document.querySelectorAll<HTMLDetailsElement>("details.sec[id]")) {
+    try {
+      const saved = localStorage.getItem(`la:sec:${sec.id}`);
+      if (saved !== null) sec.open = saved === "1";
+    } catch {
+      /* ignore */
+    }
+    sec.addEventListener("toggle", () => {
+      try {
+        localStorage.setItem(`la:sec:${sec.id}`, sec.open ? "1" : "0");
+      } catch {
+        /* ignore */
+      }
+      updateStatus(); // charts in a newly opened section need a first draw
+    });
+  }
 
   const speed = document.getElementById("speed") as HTMLInputElement;
   speedLabelEl = $("speedLabel");
   setSpeed(speedS);
   speed.addEventListener("input", () => setSpeed(parseFloat(speed.value)));
+
+  distChart = new LineChart($("turmiteCharts"), {
+    title: "Distance from start (cells)",
+    xName: "steps",
+    series: [{ name: "Distance", colorVar: "--series-1" }],
+  });
+  paintChart = new LineChart($("turmiteCharts"), {
+    title: "Painted cells",
+    xName: "steps",
+    series: [{ name: "Painted", colorVar: "--series-2", valueIndex: 1 }],
+  });
 
   colonyInfoEl = $("colonyInfo");
   $("btnAddAnt").addEventListener("click", addAntAtCenter);
@@ -834,16 +1326,14 @@ function wireButtons(): void {
   });
   $("btnCloseHelp").addEventListener("click", () => help.classList.remove("open"));
 
-  const panel = $("panel");
-  const panelToggle = $("panelToggle");
-  panelToggle.addEventListener("click", () => {
-    const open = panel.classList.toggle("open");
-    panelToggle.setAttribute("aria-expanded", open ? "true" : "false");
-  });
-  $("btnClosePanel").addEventListener("click", () => {
-    panel.classList.remove("open");
-    panelToggle.setAttribute("aria-expanded", "false");
-  });
+  $("panelToggle").addEventListener("click", () => setPanelOpen(true));
+  $("btnClosePanel").addEventListener("click", () => setPanelOpen(false));
+  setPanelOpen(window.innerWidth > 860);
+}
+
+function setPanelOpen(open: boolean): void {
+  document.body.classList.toggle("panel-open", open);
+  $("panelToggle").setAttribute("aria-expanded", open ? "true" : "false");
 }
 
 function exportJSON(): void {
@@ -977,21 +1467,40 @@ function wireKeyboard(): void {
         doReset();
         break;
       case "f":
+        setFollow(false);
         fitView();
+        break;
+      case "c":
+        if (mode === "turmite") setFollow(!followAnt);
+        break;
+      case "g": {
+        const box = $("chkGrid") as HTMLInputElement;
+        box.checked = !box.checked;
+        renderer.setOptions({ gridLines: box.checked });
+        break;
+      }
+      case "p":
+        setPanelOpen(!document.body.classList.contains("panel-open"));
+        break;
+      case "1":
+        setMode("turmite");
+        break;
+      case "2":
+        setMode("colony");
         break;
       case "+":
       case "=":
-        setSpeed(speedS + 0.05);
+        setSpeed(currentSpeed() + 0.05);
         break;
       case "-":
       case "_":
-        setSpeed(speedS - 0.05);
+        setSpeed(currentSpeed() - 0.05);
         break;
       case "?":
         $("help").classList.toggle("open");
         break;
       case "d":
-        openRuleDocs();
+        if (mode === "turmite") openRuleDocs();
         break;
       case "t":
         toggleTheme();
@@ -999,12 +1508,10 @@ function wireKeyboard(): void {
       case "Escape":
         $("help").classList.remove("open");
         closeRuleDocs();
-        if (placeMode) {
-          placeMode = false;
-          const place = $("btnPlace");
-          place.classList.remove("on");
-          place.setAttribute("aria-pressed", "false");
-          canvas.classList.remove("placing");
+        if (placeMode) exitPlaceMode();
+        if (colony !== null && colony.tool !== "pan") {
+          colony.setTool("pan");
+          canvas.classList.remove("tooling");
         }
         break;
       default:
@@ -1036,8 +1543,20 @@ function wireGlobals(): void {
 
 // ------------------------------------------------------------------ boot
 
-function applyDecoded(): void {
-  const hash = location.hash;
+/** `#m=colony&sc=<scenario>&x=<seed hex>` → the colony run it names, else null. */
+function parseColonyHash(hash: string): { scenario?: string; seed?: number } | null {
+  const params = new URLSearchParams(hash.replace(/^#/, ""));
+  if (params.get("m") !== "colony") return null;
+  const x = params.get("x");
+  return {
+    scenario: params.get("sc") ?? undefined,
+    seed: x !== null && /^[0-9a-fA-F]{1,8}$/.test(x) ? parseInt(x, 16) >>> 0 : undefined,
+  };
+}
+
+function applyDecoded(colonyLink: boolean): void {
+  // A colony link carries no turmite state: the turmite side restores from autosave.
+  const hash = colonyLink ? "" : location.hash;
   let d: DecodedState | null = null;
   if (hash.length > 1) {
     d = decodeState(hash);
@@ -1098,7 +1617,9 @@ function main(): void {
   wireCanvasEvents();
   wireKeyboard();
   applyPaletteToRenderer();
-  applyDecoded();
+  const colonyReq = parseColonyHash(location.hash);
+  applyDecoded(colonyReq !== null);
+  if (colonyReq !== null) setMode("colony", colonyReq);
   const sel = document.getElementById("paletteSelect") as HTMLSelectElement;
   sel.value = paletteId;
   try {

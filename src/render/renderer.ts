@@ -40,6 +40,11 @@ const PER_CELL_LIMIT = 512;
 const REPAINT_CHUNK_BUDGET = 4000;
 /** Min interval between texture recenters while saturated. */
 const RECENTER_MIN_INTERVAL_MS = 250;
+/** Afterglow: how many recent writes are remembered, and for how long they glow. */
+const GLOW_CAPACITY = 1024;
+const GLOW_LIFE_MS = 650;
+/** Grid lines appear at this many px per cell and above. */
+const GRID_MIN_ZOOM = 10;
 
 interface Rect {
   minX: number;
@@ -90,6 +95,22 @@ export class Renderer {
   private anchorY = 0;
   private lastRecenterAt = -1e9;
 
+  /** Display options (see setOptions). */
+  private afterglow = true;
+  private gridLines = true;
+  /** 0..1 progress of the marker from its previous cell to its current one; 1 = no tween. */
+  private tween = 1;
+  /** Ring buffer of recently written cells for the afterglow (x, y, time). */
+  private glowX = new Int32Array(GLOW_CAPACITY);
+  private glowY = new Int32Array(GLOW_CAPACITY);
+  private glowT = new Float64Array(GLOW_CAPACITY).fill(-1e9);
+  private glowHead = 0;
+  private glowLastAt = -1e9;
+  /** Minimap mapping from the last drawMinimap call: world = (px - off) / scale. */
+  private miniScale = 1;
+  private miniOffX = 0;
+  private miniOffY = 0;
+
   private chunkRects = new Map<number, number>();
   private pool = new Int32Array(1024 * 4);
 
@@ -119,6 +140,8 @@ export class Renderer {
     this.sim = sim;
     this.anchorX = 0;
     this.anchorY = 0;
+    this.prevPos.clear();
+    this.glowT.fill(-1e9);
     if (this.tctx !== null && this.texW > 0) {
       this.tctx.clearRect(0, 0, this.texW, this.texH);
     }
@@ -141,6 +164,29 @@ export class Renderer {
     this.panY = panY;
     this.zoom = zoom;
     this.viewDirty = true;
+  }
+
+  /** Force a recompose on the next frame (e.g. after another renderer used the canvas). */
+  invalidate(): void {
+    this.viewDirty = true;
+  }
+
+  setOptions(o: { afterglow?: boolean; gridLines?: boolean }): void {
+    if (o.afterglow !== undefined) this.afterglow = o.afterglow;
+    if (o.gridLines !== undefined) this.gridLines = o.gridLines;
+    this.viewDirty = true;
+  }
+
+  /**
+   * Marker tween for slow runs: `t` in [0,1) draws each ant part-way from the
+   * cell it just left to the cell it is on; 1 draws it on its cell.
+   */
+  setTween(t: number): void {
+    const v = t < 0 ? 0 : t > 1 ? 1 : t;
+    if (v !== this.tween) {
+      this.tween = v;
+      this.viewDirty = true;
+    }
   }
 
   /** Install a palette with optional per-index overrides (packed colors). */
@@ -179,7 +225,7 @@ export class Renderer {
   }
 
   /** Last known live-ant positions (identity-keyed), reused without churn. */
-  private prevPos = new Map<Ant, { x: number; y: number }>();
+  private prevPos = new Map<Ant, { x: number; y: number; px: number; py: number }>();
 
   /** One composed frame; call every animation tick. Cheap when idle. */
   frame(): void {
@@ -225,6 +271,8 @@ export class Renderer {
     }
 
     this.trackAntPositions();
+    // Fading afterglow needs frames even when nothing else changes.
+    if (this.afterglow && performance.now() - this.glowLastAt < GLOW_LIFE_MS) this.contentDirty = true;
     if (this.viewDirty || this.contentDirty) {
       this.compose();
       this.viewDirty = false;
@@ -242,8 +290,10 @@ export class Renderer {
       }
       let prev = this.prevPos.get(ant);
       if (prev === undefined) {
-        this.prevPos.set(ant, { x: ant.x, y: ant.y });
-      } else {
+        this.prevPos.set(ant, { x: ant.x, y: ant.y, px: ant.x, py: ant.y });
+      } else if (prev.x !== ant.x || prev.y !== ant.y) {
+        prev.px = prev.x;
+        prev.py = prev.y;
         prev.x = ant.x;
         prev.y = ant.y;
       }
@@ -415,9 +465,16 @@ export class Renderer {
     if (count <= PER_CELL_LIMIT) {
       const cell = this.cellImg;
       const cellU32 = this.cellU32;
+      const now = performance.now();
+      this.glowLastAt = now;
       for (let i = 0; i < count; i++) {
         const x = xs[i];
         const y = ys[i];
+        const g = this.glowHead;
+        this.glowX[g] = x;
+        this.glowY[g] = y;
+        this.glowT[g] = now;
+        this.glowHead = (g + 1) % GLOW_CAPACITY;
         const px = x - oX;
         const py = y - oY;
         if (px < 0 || py < 0 || px >= texW || py >= texH) continue;
@@ -567,21 +624,166 @@ export class Renderer {
       );
     }
 
+    const z = this.zoom;
+
+    if (this.gridLines && z >= GRID_MIN_ZOOM) {
+      ctx.strokeStyle = `rgba(128,128,128,${Math.min(0.22, 0.08 + (z - GRID_MIN_ZOOM) * 0.008)})`;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      const x0 = Math.floor(-this.panX / z);
+      const y0 = Math.floor(-this.panY / z);
+      for (let x = x0; x * z + this.panX <= this.cssW; x++) {
+        const sx = Math.round(x * z + this.panX) + 0.5;
+        ctx.moveTo(sx, 0);
+        ctx.lineTo(sx, this.cssH);
+      }
+      for (let y = y0; y * z + this.panY <= this.cssH; y++) {
+        const sy = Math.round(y * z + this.panY) + 0.5;
+        ctx.moveTo(0, sy);
+        ctx.lineTo(this.cssW, sy);
+      }
+      ctx.stroke();
+    }
+
+    if (this.afterglow && z >= 1.5) {
+      const now = performance.now();
+      ctx.fillStyle = this.accentCss;
+      for (let i = 0; i < GLOW_CAPACITY; i++) {
+        const age = now - this.glowT[i];
+        if (age >= GLOW_LIFE_MS) continue;
+        const k = 1 - age / GLOW_LIFE_MS;
+        ctx.globalAlpha = k * k * 0.6;
+        ctx.fillRect(this.glowX[i] * z + this.panX, this.glowY[i] * z + this.panY, z, z);
+      }
+      ctx.globalAlpha = 1;
+    }
+
     const sim = this.sim;
-    if (sim !== null && this.zoom >= 0.3) {
-      const size = Math.max(3, Math.min(14, this.zoom * 0.8));
-      for (const ant of sim.ants) {
-        if (ant.halted) continue;
-        const sx = (ant.x + 0.5) * this.zoom + this.panX;
-        const sy = (ant.y + 0.5) * this.zoom + this.panY;
-        ctx.fillStyle = this.accentCss;
-        ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
-        if (size >= 7) {
-          ctx.strokeStyle = "rgba(0,0,0,0.75)";
-          ctx.lineWidth = 1;
-          ctx.strokeRect(sx - size / 2 + 0.5, sy - size / 2 + 0.5, size - 1, size - 1);
+    if (sim !== null && z >= 0.3) this.drawAnts(sim.ants);
+  }
+
+  /** Ant markers: a halo plus an oriented glyph (a little ant when zoomed in). */
+  private drawAnts(ants: ReadonlyArray<Ant>): void {
+    const ctx = this.ctx;
+    const z = this.zoom;
+    const size = Math.max(5, Math.min(48, z * 0.92));
+    const many = ants.length > 1;
+    for (let i = 0; i < ants.length; i++) {
+      const ant = ants[i];
+      if (ant.halted) continue;
+      let ax = ant.x;
+      let ay = ant.y;
+      const rec = this.prevPos.get(ant);
+      if (this.tween < 1 && rec !== undefined && rec.x === ant.x && rec.y === ant.y) {
+        if (Math.abs(rec.x - rec.px) + Math.abs(rec.y - rec.py) === 1) {
+          ax = rec.px + (rec.x - rec.px) * this.tween;
+          ay = rec.py + (rec.y - rec.py) * this.tween;
         }
       }
+      const sx = (ax + 0.5) * z + this.panX;
+      const sy = (ay + 0.5) * z + this.panY;
+      if (sx < -size * 2 || sy < -size * 2 || sx > this.cssW + size * 2 || sy > this.cssH + size * 2) continue;
+      // Several ants get golden-angle hues so they can be told apart.
+      const color = many ? `hsl(${Math.round((i * 137.508) % 360)} 88% 62%)` : this.accentCss;
+      ctx.globalAlpha = 0.22;
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(sx, sy, size * 1.15, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 1;
+
+      const ang = ((ant.dir - 1) * Math.PI) / 2; // dir 1 = East = 0 rad
+      const cos = Math.cos(ang);
+      const sin = Math.sin(ang);
+      ctx.fillStyle = color;
+      ctx.strokeStyle = "rgba(0,0,0,0.7)";
+      ctx.lineWidth = 1;
+      if (size >= 12) {
+        // Legs, then abdomen / thorax / head along the heading.
+        const u = size / 2;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = Math.max(1, size * 0.06);
+        ctx.beginPath();
+        for (const along of [-0.12, 0.08, 0.28]) {
+          for (const side of [-1, 1]) {
+            const bx = sx + cos * u * along;
+            const by = sy + sin * u * along;
+            ctx.moveTo(bx, by);
+            ctx.lineTo(bx + (-sin * side * 0.62 + cos * (along - 0.08) * 0.9) * u, by + (cos * side * 0.62 + sin * (along - 0.08) * 0.9) * u);
+          }
+        }
+        ctx.stroke();
+        ctx.strokeStyle = "rgba(0,0,0,0.7)";
+        ctx.lineWidth = 1;
+        for (const [along, rx, ry] of [[-0.48, 0.36, 0.27], [0.06, 0.2, 0.16], [0.46, 0.2, 0.2]] as const) {
+          ctx.beginPath();
+          ctx.ellipse(sx + cos * u * along, sy + sin * u * along, u * rx, u * ry, ang, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        }
+      } else {
+        // Arrowhead pointing along the heading.
+        const u = size / 2;
+        ctx.beginPath();
+        ctx.moveTo(sx + cos * u, sy + sin * u);
+        ctx.lineTo(sx - cos * u * 0.8 - sin * u * 0.75, sy - sin * u * 0.8 + cos * u * 0.75);
+        ctx.lineTo(sx - cos * u * 0.35, sy - sin * u * 0.35);
+        ctx.lineTo(sx - cos * u * 0.8 + sin * u * 0.75, sy - sin * u * 0.8 - cos * u * 0.75);
+        ctx.closePath();
+        ctx.fill();
+        if (size >= 7) ctx.stroke();
+      }
     }
+  }
+
+  // --------------------------------------------------------------- minimap
+
+  /**
+   * Draw an overview of the world texture, fitted to the visited region and
+   * the current viewport, with the viewport outlined.
+   */
+  drawMinimap(mctx: CanvasRenderingContext2D, mw: number, mh: number, frameCss: string): void {
+    mctx.fillStyle = this.bgCss;
+    mctx.fillRect(0, 0, mw, mh);
+    const sim = this.sim;
+    if (sim === null) return;
+    this.computeViewportRect();
+    const v = this.viewportRect;
+    const b = sim.world.bbox;
+    const empty = bboxIsEmpty(b);
+    const minX = Math.min(empty ? v.minX : b.minX, v.minX);
+    const minY = Math.min(empty ? v.minY : b.minY, v.minY);
+    const maxX = Math.max(empty ? v.maxX : b.maxX, v.maxX);
+    const maxY = Math.max(empty ? v.maxY : b.maxY, v.maxY);
+    const spanX = maxX - minX + 1;
+    const spanY = maxY - minY + 1;
+    const scale = Math.min((mw - 8) / spanX, (mh - 8) / spanY);
+    const offX = (mw - spanX * scale) / 2 - minX * scale;
+    const offY = (mh - spanY * scale) / 2 - minY * scale;
+    this.miniScale = scale;
+    this.miniOffX = offX;
+    this.miniOffY = offY;
+    if (this.tex !== null && this.texW > 0) {
+      mctx.imageSmoothingEnabled = scale < 1;
+      mctx.drawImage(this.tex, this.originX * scale + offX, this.originY * scale + offY, this.texW * scale, this.texH * scale);
+    }
+    mctx.strokeStyle = frameCss;
+    mctx.lineWidth = 1.5;
+    mctx.strokeRect(
+      v.minX * scale + offX,
+      v.minY * scale + offY,
+      Math.max(3, (v.maxX - v.minX) * scale),
+      Math.max(3, (v.maxY - v.minY) * scale),
+    );
+    mctx.fillStyle = this.accentCss;
+    for (const ant of sim.ants) {
+      if (ant.halted) continue;
+      mctx.fillRect(ant.x * scale + offX - 1.5, ant.y * scale + offY - 1.5, 3, 3);
+    }
+  }
+
+  /** World cell under a minimap pixel (from the last drawMinimap). */
+  minimapToWorld(mx: number, my: number): { x: number; y: number } {
+    return { x: (mx - this.miniOffX) / this.miniScale, y: (my - this.miniOffY) / this.miniScale };
   }
 }

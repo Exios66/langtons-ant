@@ -96,6 +96,11 @@ export class World {
     return this.chunks.size;
   }
 
+  /** Every stored chunk (CHUNK_SIZE² cells each), for whole-grid statistics. */
+  chunkData(): IterableIterator<Uint8Array> {
+    return this.chunks.values();
+  }
+
   /** Approximate memory of the grid in bytes (chunks only, excluding Map overhead). */
   get memoryBytes(): number {
     return this.chunks.size * CHUNK_SIZE * CHUNK_SIZE;
