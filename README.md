@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Live demo](https://img.shields.io/badge/Live%20demo-exios66.github.io%2Flangtons--ant-0f6b3c)](https://exios66.github.io/langtons-ant/)
-[![Tests](https://img.shields.io/badge/tests-106%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-108%20passing-brightgreen)](tests/)
 [![Node](https://img.shields.io/badge/Node-%E2%89%A520-339933)](package.json)
 
 </div>
