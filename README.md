@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Live demo](https://img.shields.io/badge/Live%20demo-exios66.github.io%2Flangtons--ant-0f6b3c)](https://exios66.github.io/langtons-ant/)
-[![Tests](https://img.shields.io/badge/tests-99%20passing-brightgreen)](tests/)
+[![Tests](https://img.shields.io/badge/tests-108%20passing-brightgreen)](tests/)
 [![Node](https://img.shields.io/badge/Node-%E2%89%A520-339933)](package.json)
 
 </div>
@@ -68,7 +68,10 @@ RUN_BENCH=1 npx vitest run tests/bench.test.ts
 | Renderer | Chunked typed-array unbounded grid; changed cells are painted incrementally into an offscreen 1 px/cell texture, which is redrawn onto the visible canvas each frame it changes |
 | Determinism | Seeded, fully reproducible runs. A permalink (`#r=…&i=…&s=…&z=…&c=…&x=…`) reproduces the run it was copied from: small grids ride along in the link, larger runs are rebuilt by re-simulating from the starting ants (up to 50M steps, with progress); a run edited mid-run that is too big to embed says so instead |
 | Presets | A curated gallery of verified landmark machines (below), each with notation, milestone and source |
-| Colony mode | Run many ants at once — every ant acts each step in array order |
+| Multi-ant runs | Run many ants at once — every ant acts each step in array order |
+| Ant colonies | A second simulation (`Colony` tab, key `2`): continuous-motion ants that forage with two evaporating pheromones (home and food trail), three castes (workers, scouts, soldiers), a nest economy (food store pays for meals and new ants), death by starvation, age or combat, and rival colonies with alarm pheromone. Five scenarios (foraging, Deneubourg's double bridge, two rivals, four-way war, maze), paint tools for food and walls, live behavior sliders. Seeded: a scenario + seed replays identically on a given JS engine |
+| Analytics | Live charts with hover read-out and CSV download: distance from start and painted cells against steps (with the highway onset marked), cell-color shares; per-colony population, food store, caste split and a births/deaths ledger |
+| View | Oriented ant glyphs, smooth marker motion at low speed, afterglow on freshly written cells, grid lines when zoomed in, overview minimap, follow-the-ant camera (`c`), eased fit, hover cell read-out, collapsible panel sections, fullscreen |
 | Detection | Live highway detector for a single ant: a step-based drift heuristic (not a proof of periodicity) that flags the classic ant's highway a few thousand steps after it starts, reports an estimated onset step in a badge, and can auto-pause. It does not depend on frame rate |
 | Documentation | In-app rule-space primer (press `d`); full bibliography in `citations.bib` |
 | Theming | Dark/light theme toggle (`t`) |
@@ -183,7 +186,8 @@ The throughput *determinism* is pinned separately: after exactly **11,000 classi
 .
 ├── index.html
 ├── src/
-│   ├── app/                # rAF loop, UI, URL-state / permalinks
+│   ├── app/                # rAF loop, UI, URL-state / permalinks, charts, colony-mode controller
+│   ├── colony/             # ant-colony simulation (pheromones, castes, economy, combat) and scenarios
 │   ├── render/             # palette, dirty-rect Canvas2D renderer
 │   └── engine/             # frozen: rule, grid, simulation, serialize, hash, prng, presets
 ├── tests/                  # vitest: rule, grid, simulation, serialize, golden, highway, restore, presets, bench
