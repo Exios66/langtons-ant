@@ -67,16 +67,33 @@ test.describe("turmite mode", () => {
 
   test("an ant added while paused is drawn", async ({ page }) => {
     await pause(page);
-    await page.mouse.move(5, 5);
-    await page.waitForTimeout(1000); // let the afterglow fade so the frame is still
-    const clip = await page.locator("#board").boundingBox();
-    if (clip === null) throw new Error("no canvas");
-    const region = { x: clip.width / 2 - 80, y: clip.height / 2 - 80, width: 160, height: 160 };
-    const before = await page.screenshot({ clip: region });
+    const box = await page.locator("#board").boundingBox();
+    if (box === null) throw new Error("no canvas");
+    const cx = box.width * 0.35;
+    const cy = box.height / 2;
+    // Pan the existing ant and its trail well away from the spot the new ant
+    // lands on (the view center), so only the new marker can light it up.
+    await page.mouse.move(cx + 200, cy);
+    await page.mouse.down();
+    await page.mouse.move(cx - 250, cy, { steps: 8 });
+    await page.mouse.up();
+    await page.waitForTimeout(800); // let the afterglow fade so the frame is still
+    const litAtCenter = (): Promise<number> =>
+      page.evaluate(() => {
+        const c = document.getElementById("board") as HTMLCanvasElement;
+        const ctx = c.getContext("2d") as CanvasRenderingContext2D;
+        const k = c.width / c.clientWidth;
+        const half = Math.round(40 * k);
+        const d = ctx.getImageData(c.width / 2 - half, c.height / 2 - half, half * 2, half * 2).data;
+        let n = 0;
+        for (let i = 0; i < d.length; i += 4) if (d[i] + d[i + 1] + d[i + 2] > 60) n++;
+        return n;
+      });
+    expect(await litAtCenter()).toBe(0);
     const ants = await counter(page, "st-ants");
     await page.locator("#btnAddAnt").click();
     await expect.poll(() => counter(page, "st-ants")).toBe(ants + 1);
-    await expect.poll(async () => (await page.screenshot({ clip: region })).equals(before)).toBe(false);
+    await expect.poll(litAtCenter).toBeGreaterThan(20);
   });
 
   test("the highway chip shows on a highway and belongs to turmite mode only", async ({ page }) => {
