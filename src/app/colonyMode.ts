@@ -57,6 +57,9 @@ export class ColonyMode {
   readonly layers: ColonyLayers = { trail: true, home: true, alarm: true };
 
   private readonly renderer: ColonyRenderer;
+  private readonly canvas: HTMLCanvasElement;
+  /** Last painted point of the current drag, in cells. */
+  private lastPaint: { x: number; y: number } | null = null;
   private readonly host: ColonyHost;
   private carry = 0;
   private popSeries: Series;
@@ -70,6 +73,7 @@ export class ColonyMode {
 
   constructor(canvas: HTMLCanvasElement, host: ColonyHost, scenarioId?: string, seed?: number) {
     this.renderer = new ColonyRenderer(canvas);
+    this.canvas = canvas;
     this.host = host;
     this.scenarioId = scenarioById(scenarioId ?? SCENARIOS[0].id).id;
     this.seed = (seed ?? DEFAULT_SEED) >>> 0;
@@ -165,8 +169,26 @@ export class ColonyMode {
 
   // --------------------------------------------------------------- editing
 
-  /** Apply the active tool at a world position (in cells). */
-  paint(wx: number, wy: number): void {
+  /**
+   * Apply the active tool at a world position (in cells). With
+   * `continueStroke`, stamp along the segment from the previous point too, so
+   * a fast drag leaves an unbroken stroke.
+   */
+  paint(wx: number, wy: number, continueStroke = false): void {
+    const last = continueStroke ? this.lastPaint : null;
+    this.lastPaint = { x: wx, y: wy };
+    if (last === null) {
+      this.stamp(wx, wy);
+      return;
+    }
+    const dx = wx - last.x;
+    const dy = wy - last.y;
+    // Disc stamps spaced one radius apart overlap into a solid band.
+    const n = Math.ceil(Math.hypot(dx, dy) / Math.max(1, this.brush));
+    for (let i = 1; i <= n; i++) this.stamp(last.x + (dx * i) / n, last.y + (dy * i) / n);
+  }
+
+  private stamp(wx: number, wy: number): void {
     if (this.tool === "food") this.sim.paintFood(wx, wy, this.brush, 6);
     else if (this.tool === "wall") this.sim.paintWall(wx, wy, this.brush, true);
     else if (this.tool === "erase") this.sim.erase(wx, wy, this.brush);
@@ -174,6 +196,8 @@ export class ColonyMode {
 
   setTool(tool: ColonyTool): void {
     this.tool = tool;
+    this.lastPaint = null;
+    this.canvas.classList.toggle("tooling", tool !== "pan");
     for (const btn of document.querySelectorAll<HTMLElement>("[data-tool]")) {
       const on = btn.dataset.tool === tool;
       btn.classList.toggle("on", on);

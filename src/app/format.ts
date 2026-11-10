@@ -14,14 +14,14 @@ export function fmtBytes(n: number): string {
 /** Compact magnitude for axis labels: 950, 1.2k, 34k, 5.6M, 1.2B. */
 export function fmtCompact(n: number): string {
   if (!Number.isFinite(n)) return "—";
-  const a = Math.abs(n);
-  if (a < 1000) return String(Math.round(n * 10) / 10);
-  const units = ["k", "M", "B", "T"];
-  let u = -1;
+  const units = ["", "k", "M", "B", "T"];
+  let u = 0;
   let v = n;
-  while (Math.abs(v) >= 1000 && u < units.length - 1) {
+  for (;;) {
+    // Round first, then decide the unit, so 999_960 reads "1M", not "1000k".
+    const r = u === 0 || Math.abs(v) < 100 ? Math.round(v * 10) / 10 : Math.round(v);
+    if (Math.abs(r) < 1000 || u === units.length - 1) return String(r) + units[u];
     v /= 1000;
     u++;
   }
-  return (Math.abs(v) < 100 ? v.toFixed(1).replace(/\.0$/, "") : String(Math.round(v))) + units[u];
 }

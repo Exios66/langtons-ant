@@ -14,7 +14,7 @@ import { bboxIsEmpty, World, type BBox } from "../engine/grid";
 import { PRESETS, type Preset } from "../engine/presets";
 import { mulberry32 } from "../engine/prng";
 import { ruleToString, mirrorRule, parseAntString, type Rule } from "../engine/rule";
-import { Simulation } from "../engine/simulation";
+import { Simulation, type Ant } from "../engine/simulation";
 import { toB36 } from "../engine/serialize";
 import { DEFAULT_PALETTE_ID, PALETTES, hueSpreadPacked, packedToCss, paletteById } from "../render/palette";
 import { Renderer } from "../render/renderer";
@@ -106,8 +106,8 @@ const SAMPLE_MIN_INTERVAL_MS = 100;
 const tSeries = new Series(2, 50);
 let distChart: LineChart | null = null;
 let paintChart: LineChart | null = null;
-let originX = 0;
-let originY = 0;
+/** Each ant's starting cell, so the distance chart measures travel, not spread. */
+let antOrigin = new WeakMap<Ant, { x: number; y: number }>();
 let lastSampleAt = 0;
 const colorCounts = new Float64Array(32);
 let colorCountsValid = false;
@@ -208,11 +208,9 @@ function newRun(r: Rule, opts: RunOptions = {}): void {
   replayTarget = 0;
   if (opts.running !== undefined) running = opts.running;
   const startAnts = recipe ?? ants;
-  originX = 0;
-  originY = 0;
-  for (const a of startAnts) {
-    originX += a.x / startAnts.length;
-    originY += a.y / startAnts.length;
+  antOrigin = new WeakMap();
+  if (startAnts.length === sim.ants.length) {
+    sim.ants.forEach((ant, i) => antOrigin.set(ant, { x: startAnts[i].x, y: startAnts[i].y }));
   }
   tSeries.clear();
   lastSampleAt = 0;
@@ -317,7 +315,13 @@ function sampleTurmite(now: number): void {
   let live = 0;
   for (const a of sim.ants) {
     if (a.halted) continue;
-    dist += Math.hypot(a.x - originX, a.y - originY);
+    let o = antOrigin.get(a);
+    if (o === undefined) {
+      // Added after the run started: measure from where it was first seen.
+      o = { x: a.x, y: a.y };
+      antOrigin.set(a, o);
+    }
+    dist += Math.hypot(a.x - o.x, a.y - o.y);
     live++;
   }
   colorCountsValid = scanColors();
@@ -961,6 +965,8 @@ function clampSpeed(s: number): number {
 const pointers = new Map<number, { x: number; y: number }>();
 let pinch: { dist: number; mx: number; my: number; cam: Camera } | null = null;
 let downMoved = false;
+/** True while a single-pointer paint drag is in progress (so moves join up). */
+let stroking = false;
 
 function touchPos(list: Array<{ x: number; y: number }>): { dist: number; mx: number; my: number } | null {
   if (list.length !== 2) return null;
@@ -983,7 +989,11 @@ function wireCanvasEvents(): void {
     }
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     camGoal = null;
-    if (pointers.size === 1 && toolActive()) paintAt(e.clientX, e.clientY);
+    stroking = false;
+    if (pointers.size === 1 && toolActive()) {
+      paintAt(e.clientX, e.clientY, false);
+      stroking = true;
+    }
     if (pointers.size === 2) {
       const list = Array.from(pointers.values());
       const t = touchPos(list);
@@ -1003,7 +1013,8 @@ function wireCanvasEvents(): void {
     prev.x = e.clientX;
     prev.y = e.clientY;
     if (pointers.size === 1 && pinch === null && toolActive()) {
-      paintAt(e.clientX, e.clientY);
+      paintAt(e.clientX, e.clientY, stroking);
+      stroking = true;
     } else if (pointers.size === 1 && pinch === null) {
       if (followAnt && downMoved) setFollow(false);
       panBy(cam, dx, dy);
@@ -1025,6 +1036,7 @@ function wireCanvasEvents(): void {
   const release = (e: PointerEvent) => {
     const wasSingle = pointers.size === 1;
     pointers.delete(e.pointerId);
+    stroking = false;
     if (pointers.size < 2) pinch = null;
     if (wasSingle && !downMoved && placeMode && mode === "turmite") {
       toggleAntAt(e.clientX, e.clientY);
@@ -1051,9 +1063,10 @@ function toolActive(): boolean {
   return mode === "colony" && colony !== null && colony.tool !== "pan";
 }
 
-function paintAt(sx: number, sy: number): void {
+/** Paint at a screen point; `continueStroke` joins it to the previous point of the drag. */
+function paintAt(sx: number, sy: number, continueStroke: boolean): void {
   if (colony === null) return;
-  colony.paint((sx - cam.panX) / cam.zoom, (sy - cam.panY) / cam.zoom);
+  colony.paint((sx - cam.panX) / cam.zoom, (sy - cam.panY) / cam.zoom, continueStroke);
 }
 
 /** Show the cell under the cursor in the status bar. */
@@ -1194,11 +1207,6 @@ function wireButtons(): void {
     const url = location.origin + location.pathname + location.search + "#" + colony.hash();
     void copyText(url).then((ok) => toast(ok ? "Colony link copied (scenario + seed)" : "Copy failed"));
   });
-  for (const btn of document.querySelectorAll<HTMLElement>("[data-tool]")) {
-    btn.addEventListener("click", () => {
-      canvas.classList.toggle("tooling", toolActive());
-    });
-  }
   $("btnTurmiteCSV").addEventListener("click", () => {
     downloadText(
       `langtons-ant-${ruleToString(rule)}-${toB36(sim.stepCount)}.csv`,
@@ -1511,7 +1519,6 @@ function wireKeyboard(): void {
         if (placeMode) exitPlaceMode();
         if (colony !== null && colony.tool !== "pan") {
           colony.setTool("pan");
-          canvas.classList.remove("tooling");
         }
         break;
       default:

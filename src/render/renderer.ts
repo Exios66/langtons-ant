@@ -280,17 +280,25 @@ export class Renderer {
     }
   }
 
+  /**
+   * Update the tween records and notice ants added or removed outside a step
+   * (edits while paused), which change no cells but must still be drawn.
+   */
   private trackAntPositions(): void {
     const sim = this.sim;
     if (sim === null) return;
+    let live = 0;
+    let added = false;
     for (const ant of sim.ants) {
       if (ant.halted) {
-        this.prevPos.delete(ant);
+        if (this.prevPos.delete(ant)) this.contentDirty = true;
         continue;
       }
+      live++;
       let prev = this.prevPos.get(ant);
       if (prev === undefined) {
         this.prevPos.set(ant, { x: ant.x, y: ant.y, px: ant.x, py: ant.y });
+        added = true;
       } else if (prev.x !== ant.x || prev.y !== ant.y) {
         prev.px = prev.x;
         prev.py = prev.y;
@@ -298,6 +306,16 @@ export class Renderer {
         prev.y = ant.y;
       }
     }
+    if (this.prevPos.size !== live) {
+      // Some tracked ants left sim.ants: drop them so they are neither drawn
+      // from stale state nor retained.
+      const current = new Set(sim.ants);
+      for (const ant of this.prevPos.keys()) {
+        if (!current.has(ant)) this.prevPos.delete(ant);
+      }
+      added = true;
+    }
+    if (added) this.contentDirty = true;
   }
 
   /**
@@ -450,6 +468,20 @@ export class Renderer {
 
   // ------------------------------------------------------------ grid paint
 
+  private recordGlow(xs: ArrayLike<number>, ys: ArrayLike<number>, from: number, to: number): void {
+    if (from >= to) return;
+    const now = performance.now();
+    this.glowLastAt = now;
+    let g = this.glowHead;
+    for (let i = from; i < to; i++) {
+      this.glowX[g] = xs[i];
+      this.glowY[g] = ys[i];
+      this.glowT[g] = now;
+      g = (g + 1) % GLOW_CAPACITY;
+    }
+    this.glowHead = g;
+  }
+
   private paintChanges(count: number): void {
     const tctx = this.tctx;
     const sim = this.sim;
@@ -462,19 +494,16 @@ export class Renderer {
     const texW = this.texW;
     const texH = this.texH;
 
+    // Afterglow keeps the most recent changes; older ones in a big batch
+    // would be overwritten in the ring anyway.
+    this.recordGlow(xs, ys, Math.max(0, count - GLOW_CAPACITY), count);
+
     if (count <= PER_CELL_LIMIT) {
       const cell = this.cellImg;
       const cellU32 = this.cellU32;
-      const now = performance.now();
-      this.glowLastAt = now;
       for (let i = 0; i < count; i++) {
         const x = xs[i];
         const y = ys[i];
-        const g = this.glowHead;
-        this.glowX[g] = x;
-        this.glowY[g] = y;
-        this.glowT[g] = now;
-        this.glowHead = (g + 1) % GLOW_CAPACITY;
         const px = x - oX;
         const py = y - oY;
         if (px < 0 || py < 0 || px >= texW || py >= texH) continue;
