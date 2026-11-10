@@ -113,6 +113,14 @@ test.describe("colony mode", () => {
       await page.selectOption("#scenarioSelect", id);
       await expect(page).toHaveURL(new RegExp(`sc=${id}`));
       await expect.poll(() => counter(page, "st-ants")).toBeGreaterThan(0);
+      // The tick counter of this scenario's run keeps advancing.
+      await expect
+        .poll(async () => {
+          const a = await counter(page, "st-steps");
+          await page.waitForTimeout(400);
+          return (await counter(page, "st-steps")) > a;
+        })
+        .toBe(true);
     }
   });
 
@@ -157,13 +165,27 @@ test.describe("colony mode", () => {
     await page.mouse.move(x1, y, { steps: 2 }); // two big jumps
     await page.mouse.up();
     await page.locator('[data-tool="pan"]').click();
-    // Probe the stroke through the hover read-out every few pixels.
-    const gaps: number[] = [];
-    for (let x = x0; x <= x1; x += 6) {
-      await page.mouse.move(x, y);
-      const cell = (await page.locator("#st-cell").textContent()) ?? "";
-      if (!cell.includes("wall")) gaps.push(Math.round(x));
-    }
+    // Probe every pixel along the stroke through the hover read-out, and
+    // check that the cells it crosses are all wall and form an unbroken run.
+    const probe = await page.evaluate(
+      ({ x0, x1, y, left, top }) => {
+        const board = document.getElementById("board") as HTMLCanvasElement;
+        const out = document.getElementById("st-cell") as HTMLElement;
+        const cells = new Map<number, string>();
+        for (let x = Math.ceil(x0); x <= Math.floor(x1); x++) {
+          board.dispatchEvent(new PointerEvent("pointermove", { clientX: left + x, clientY: top + y, bubbles: true }));
+          const text = out.textContent ?? "";
+          const cx = Number(text.split(",")[0]);
+          if (!cells.has(cx) || !text.includes("wall")) cells.set(cx, text);
+        }
+        return [...cells.entries()];
+      },
+      { x0, x1, y, left: box.x, top: box.y },
+    );
+    const xs = probe.map(([cx]) => cx).sort((a, b) => a - b);
+    expect(xs.length).toBeGreaterThan(20);
+    expect(xs[xs.length - 1] - xs[0] + 1).toBe(xs.length); // no skipped cell
+    const gaps = probe.filter(([, text]) => !text.includes("wall")).map(([, text]) => text);
     expect(gaps).toEqual([]);
   });
 });
