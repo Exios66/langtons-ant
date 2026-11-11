@@ -36,7 +36,7 @@ npm run build
 npm run test:e2e   # builds, then Playwright UI tests in tests/e2e/ (Chromium)
 ```
 
-- `npm run test:e2e` needs Chromium. If the installed Playwright browser version does not match, set `PW_CHROMIUM_PATH` to a Chromium executable instead of reinstalling.
+- `npm run test:e2e` needs Playwright's Chromium. On a fresh setup, install it once with `npx playwright install chromium` (add `--with-deps` on a bare Linux machine; CI does this). If a Chromium is already installed but its version does not match Playwright's, set `PW_CHROMIUM_PATH` to its executable instead of reinstalling.
 - For a UI bug fix, add or extend an e2e test, and confirm it fails without the fix and passes with it.
 - Never skip, disable or loosen a test to get green.
 
